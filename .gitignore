@@ -21,5 +21,6 @@ ghostdriver.log
 # Exclude unrelated local files
 py1.py
 py2.py
-spotifylinks.txt
+spotify_links.txt
+chatgpt_session.txt
 

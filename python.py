@@ -18,8 +18,8 @@ URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=
 CHATGPT_SESSION_URL = "https://chatgpt.com/api/auth/session"
 SESSION_FILE_PATH = "chatgpt_session.txt"
 
-driver = None
-bot_lock = asyncio.Lock()  # Prevent overlapping browser instances
+# Max concurrent Chrome instances to protect server resources
+bot_semaphore = asyncio.Semaphore(3)
 
 # Load .env file manually
 if os.path.exists(".env"):
@@ -38,8 +38,6 @@ def clear_session_file():
         pass
 
 def run_flow(email, password):
-    global driver
-    
     max_retries = 2
     retry_count = 0
     
@@ -74,7 +72,7 @@ def run_flow(email, password):
             driver.get('https://chatgpt.com/')
             print("Opened ChatGPT in a second tab.")
             
-            time.sleep(3)
+            time.sleep(1)
             current_url = driver.current_url.lower()
             print(f"Current ChatGPT URL: {current_url}")
             
@@ -95,9 +93,7 @@ def run_flow(email, password):
             print("Waiting for ChatGPT email input...")
             chatgpt_email_input = wait.until(EC.element_to_be_clickable((By.ID, "email")))
             chatgpt_email_input.clear()
-            for char in email:
-                chatgpt_email_input.send_keys(char)
-                time.sleep(0.05)
+            chatgpt_email_input.send_keys(email)
                 
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", chatgpt_email_input)
             print("Entered email into ChatGPT successfully.")
@@ -112,9 +108,7 @@ def run_flow(email, password):
             print(f"Typing email: {email}")
             email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
             email_input.clear()
-            for char in email:
-                email_input.send_keys(char)
-                time.sleep(0.05)
+            email_input.send_keys(email)
                 
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
             print("Email entered successfully.")
@@ -127,9 +121,7 @@ def run_flow(email, password):
             print("Waiting for password field...")
             password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
             password_input.clear()
-            for char in password:
-                password_input.send_keys(char)
-                time.sleep(0.05)
+            password_input.send_keys(password)
                 
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
             print("Password entered successfully.")
@@ -183,7 +175,7 @@ def run_flow(email, password):
                     print("Stay signed in prompt did not appear or failed:", stay_signed_err)
             
             print("Inbox loaded. Searching for ChatGPT verification emails...")
-            time.sleep(3)
+            time.sleep(1)
             chatgpt_email_found = False
             extracted_code = None
             
@@ -195,21 +187,19 @@ def run_flow(email, password):
                 
                 search_term = "chatgpt code"
                 print(f"Typing search query: {search_term}")
-                for char in search_term:
-                    search_input.send_keys(char)
-                    time.sleep(0.1)
+                search_input.send_keys(search_term)
                     
-                time.sleep(2)
+                time.sleep(0.5)
                 search_input.send_keys("\n")
                 print("Search submitted successfully.")
                 
                 print("Waiting for search results to display...")
-                time.sleep(5)
+                time.sleep(2)
                 
                 empty_state = driver.find_elements(By.XPATH, "//span[contains(text(), 'No more results to show')]")
                 if empty_state:
                     print("No search results found! Opening TOPMOST email...")
-                    time.sleep(2)
+                    time.sleep(0.5)
                     top_email = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")))
                     top_email.click()
                     print("Clicked TOPMOST email!")
@@ -242,24 +232,22 @@ def run_flow(email, password):
                     driver.switch_to.window(chatgpt_window)
                     print("Switched to ChatGPT window to trigger resend...")
                     
-                    time.sleep(2)
+                    time.sleep(0.5)
                     resend_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='resend']")))
                     resend_btn.click()
                     print("Clicked 'Resend email' button in ChatGPT!")
                     
                     driver.switch_to.window(original_window)
                     print("Switched back to Outlook window...")
-                    time.sleep(10)
+                    time.sleep(4)
                     
                     search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
                     search_input.click()
                     search_input.clear()
-                    for char in "chatgpt code":
-                        search_input.send_keys(char)
-                        time.sleep(0.05)
+                    search_input.send_keys("chatgpt code")
                     search_input.send_keys("\n")
                     print("Search refreshed.")
-                    time.sleep(8)
+                    time.sleep(3)
                     
                     empty_state = driver.find_elements(By.XPATH, "//span[contains(text(), 'No more results to show')]")
                     if empty_state:
@@ -290,7 +278,11 @@ def run_flow(email, password):
                     
             if not chatgpt_email_found:
                 print("OpenAI verification email not found in scan loop.")
-                return False
+                try:
+                    driver.quit()
+                except:
+                    pass
+                return False, None
                 
             time.sleep(5)
 
@@ -337,9 +329,7 @@ def run_flow(email, password):
                         
                         code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
                         code_input.clear()
-                        for char in code_to_enter:
-                            code_input.send_keys(char)
-                            time.sleep(0.05)
+                        code_input.send_keys(code_to_enter)
                         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
                         
                         try:
@@ -350,18 +340,26 @@ def run_flow(email, password):
                         except Exception:
                             pass
                         
-                        return True
+                        return True, driver
                 except Exception as e:
                     print("Error during code checking cycle:", e)
                 
                 time.sleep(2)
             
             print("Search timed out.")
-            return False
+            try:
+                driver.quit()
+            except:
+                pass
+            return False, None
             
         except Exception as e:
             print("Flow failed:", e)
-            return False
+            try:
+                driver.quit()
+            except:
+                pass
+            return False, None
 
 def save_session_to_file(pre_text):
     try:
@@ -371,8 +369,7 @@ def save_session_to_file(pre_text):
     except Exception as e:
         print(f"Failed to save: {e}")
 
-def fill_profile_form():
-    global driver
+def fill_profile_form(driver):
     wait = WebDriverWait(driver, 30)
     
     print("Waiting for profile registration form to load...")
@@ -394,12 +391,10 @@ def fill_profile_form():
     def type_slowly(element, text):
         try:
             element.click()
-            time.sleep(0.1)
+            time.sleep(0.05)
             element.clear()
-            time.sleep(0.1)
-            for char in text:
-                element.send_keys(char)
-                time.sleep(0.04)
+            time.sleep(0.05)
+            element.send_keys(text)
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", element)
             driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
             driver.execute_script("arguments[0].dispatchEvent(new Event('blur', { bubbles: true }));", element)
@@ -515,9 +510,8 @@ def fill_profile_form():
     except Exception as e:
         print(f"Could not click submit: {e}")
 
-    delay = random.randint(10, 15)
-    print(f"Waiting {delay} seconds...")
-    time.sleep(delay)
+    print("Waiting 4 seconds for profile creation...")
+    time.sleep(4)
     
     print("Opening ChatGPT session API...")
     driver.switch_to.new_window('tab')
@@ -538,6 +532,22 @@ def fill_profile_form():
         print(f"Error: {e}")
         return None
 
+def fetch_session_only(driver):
+    if not driver:
+        return None
+    try:
+        print("Fetching session for plan check...")
+        driver.switch_to.new_window('tab')
+        driver.get(CHATGPT_SESSION_URL)
+        time.sleep(3)
+        wait = WebDriverWait(driver, 15)
+        pre_element = wait.until(EC.presence_of_element_located((By.TAG_NAME, "pre")))
+        pre_text = pre_element.text
+        return pre_text
+    except Exception as e:
+        print(f"Error fetching session for plan check: {e}")
+        return None
+
 # --- DISCORD BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True
@@ -555,32 +565,47 @@ def parse_credentials(ctx, user_input):
 
 @bot.command(name="check")
 async def check_command(ctx, *, credentials: str = ""):
-    """Check Outlook + ChatGPT login and verification flow"""
+    """Check Outlook + ChatGPT login and verify plan type"""
     email, password = parse_credentials(ctx, credentials)
     if not email or not password:
         await ctx.send("⚠️ **Invalid format!** Please use: `!check email:password`")
         return
         
-    await ctx.send(f"⏳ **[Check]** Starting verification flow for `{email}`...\n*(Only 1 Selenium instance can run at a time)*")
+    await ctx.send(f"⏳ **[Check]** Starting verification & plan check for `{email}`...\n*(Running concurrently. Max limit: 3 Chrome instances)*")
     
-    global driver
-    async with bot_lock:
+    async with bot_semaphore:
+        local_driver = None
         try:
-            # Run Selenium in a background thread to prevent blocking the async loop
-            success = await asyncio.to_thread(run_flow, email, password)
-            if success:
-                await ctx.send(f"✅ **[Check Success]** `{email}` passed Outlook authentication and ChatGPT verification successfully!")
+            # Run Selenium in a background thread
+            success, local_driver = await asyncio.to_thread(run_flow, email, password)
+            if success and local_driver:
+                # Fetch plan type directly from session API response
+                session_response = await asyncio.to_thread(fetch_session_only, local_driver)
+                
+                if session_response:
+                    try:
+                        session_data = json.loads(session_response)
+                        plan_type = session_data.get("account", {}).get("planType", "free").lower()
+                        
+                        if plan_type == "plus" or plan_type == "premium" or plan_type == "durango":
+                            await ctx.send(f"✅ **[Check Success]** `{email}` is fully verified!\n📝 **Plan Type:** `PLUS` 🌟 (Plan Exists!)")
+                        else:
+                            await ctx.send(f"❌ **[Check Result]** `{email}` verified, but it is a **FREE** account (No Plan).")
+                    except Exception as parse_err:
+                        print(f"Error parsing check session: {parse_err}")
+                        await ctx.send(f"✅ **[Check Success]** `{email}` verified, but failed to parse plan details.")
+                else:
+                    await ctx.send(f"✅ **[Check Success]** `{email}` verified, but session details were empty.")
             else:
-                await ctx.send(f"❌ **[Check Failed]** Flow failed for `{email}`. Check console logs for details.")
+                await ctx.send(f"❌ **[Check Failed]** Flow failed for `{email}` (login/error).")
         except Exception as err:
             await ctx.send(f"⚠️ **[Check Error]** An unexpected exception occurred: `{err}`")
         finally:
-            if driver:
+            if local_driver:
                 try:
-                    driver.quit()
+                    local_driver.quit()
                 except:
                     pass
-                driver = None
 
 @bot.command(name="session")
 async def session_command(ctx, *, credentials: str = ""):
@@ -590,15 +615,15 @@ async def session_command(ctx, *, credentials: str = ""):
         await ctx.send("⚠️ **Invalid format!** Please use: `!session email:password`")
         return
         
-    await ctx.send(f"⏳ **[Session]** Starting registration + session retrieval for `{email}`...\n*(This can take up to 2 minutes)*")
+    await ctx.send(f"⏳ **[Session]** Starting registration + session retrieval for `{email}`...\n*(Running concurrently. Max limit: 3 Chrome instances)*")
     
-    global driver
-    async with bot_lock:
+    async with bot_semaphore:
+        local_driver = None
         try:
-            success = await asyncio.to_thread(run_flow, email, password)
-            if success:
+            success, local_driver = await asyncio.to_thread(run_flow, email, password)
+            if success and local_driver:
                 await ctx.send("✏️ Outlook verification complete. Filling profile registration details (name/age)...")
-                session_response = await asyncio.to_thread(fill_profile_form)
+                session_response = await asyncio.to_thread(fill_profile_form, local_driver)
                 
                 if session_response:
                     await ctx.send(f"🎉 **[Session Retrieval Successful]** Profile onboarding complete!")
@@ -633,12 +658,11 @@ async def session_command(ctx, *, credentials: str = ""):
         except Exception as err:
             await ctx.send(f"⚠️ **[Session Error]** An unexpected exception occurred: `{err}`")
         finally:
-            if driver:
+            if local_driver:
                 try:
-                    driver.quit()
+                    local_driver.quit()
                 except:
                     pass
-                driver = None
 
 # --- RUN BOT ---
 if __name__ == "__main__":

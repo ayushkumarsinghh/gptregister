@@ -550,66 +550,6 @@ def fetch_session_only(driver):
         print(f"Error fetching session for plan check: {e}")
         return None
 
-def automate_checkout_link_selenium(driver, session_response):
-    if not session_response:
-        print("[Billing] Empty session response. Skipping generation.")
-        return None
-    try:
-        print("[Billing] Navigating to https://gptcheckout.onrender.com/ to generate secure link...")
-        driver.get("https://gptcheckout.onrender.com/")
-        
-        wait = WebDriverWait(driver, 15)
-        # Wait for the session textarea
-        session_input = wait.until(EC.presence_of_element_located((By.ID, "sessionInput")))
-        
-        # Paste the session JSON instantly using JS
-        driver.execute_script("arguments[0].value = arguments[1];", session_input, session_response)
-        print("[Billing] Pasted ChatGPT session JSON successfully.")
-        
-        # Locate and click the 'Generate Secure Link' button
-        generate_btn = wait.until(EC.element_to_be_clickable((By.ID, "generateBtn")))
-        generate_btn.click()
-        print("[Billing] Clicked 'Generate Secure Link' button.")
-        
-        # Wait for the result input to become visible and populate with a URL
-        result_input = wait.until(EC.presence_of_element_located((By.ID, "resultUrl")))
-        
-        # Poll up to 15 seconds (30 * 0.5s) for the Stripe link to appear
-        stripe_url = ""
-        for _ in range(30):
-            stripe_url = result_input.get_attribute("value")
-            if stripe_url and stripe_url.startswith("http"):
-                break
-            time.sleep(0.5)
-            
-        if stripe_url:
-            print(f"[Billing] Successfully retrieved Stripe checkout URL: {stripe_url}")
-            
-            # Click the Copy button instead of Launch Checkout
-            try:
-                print("[Billing] Waiting for Copy button to be clickable...")
-                copy_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@onclick='copyResult()' or @title='Copy']")))
-                copy_btn.click()
-                print("[Billing] Clicked Copy button successfully!")
-                
-                # Accept the "Copied!" alert popup so the browser does not freeze
-                try:
-                    alert = WebDriverWait(driver, 5).until(EC.alert_is_present())
-                    alert.accept()
-                    print("[Billing] Accepted the 'Copied!' browser alert.")
-                except Exception as alert_err:
-                    pass
-            except Exception as click_err:
-                print(f"[Billing] Warning: Could not click Copy button: {click_err}")
-                
-            return stripe_url
-        else:
-            print("[Billing] Failed to fetch generated URL from page result.")
-            return None
-    except Exception as e:
-        print(f"[Billing] Error during Selenium billing flow: {e}")
-        return None
-
 # --- DISCORD BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True
@@ -690,14 +630,7 @@ async def session_command(ctx, *, credentials: str = ""):
                 if session_response:
                     await ctx.send(f"🎉 **[Session Retrieval Successful]** Profile onboarding complete!")
                     
-                    # Generate INR Link directly via automated UI!
-                    await ctx.send("⏳ **[Billing]** Generating secure ChatGPT Plus **INR** payment checkout link via gptcheckout.onrender.com...")
-                    checkout_url = await asyncio.to_thread(automate_checkout_link_selenium, local_driver, session_response)
-                    
-                    if checkout_url:
-                        await ctx.send(f"💳 **[INR Payment Link]** Direct Stripe Checkout Ready:\n👉 **<{checkout_url}>**")
-                    else:
-                        await ctx.send("❌ **[Billing Failed]** Failed to generate INR Stripe checkout URL automatically.")
+
                     
                     try:
                         session_data = json.loads(session_response)

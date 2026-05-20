@@ -18,13 +18,40 @@ URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=
 
 bot_semaphore = asyncio.Semaphore(3)
 
-def fetch_otp_from_outlook(email, password):
+# --- ACCESS CONTROL SYSTEM ---
+OWNER_ID = 1074981715971428432
+ALLOWED_USERS_FILE = "allowed_users.json"
+
+def load_allowed_users():
+    if not os.path.exists(ALLOWED_USERS_FILE):
+        with open(ALLOWED_USERS_FILE, "w") as f:
+            json.dump([], f)
+        return []
+    try:
+        with open(ALLOWED_USERS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_allowed_users(users_list):
+    try:
+        with open(ALLOWED_USERS_FILE, "w") as f:
+            json.dump(users_list, f)
+    except Exception as e:
+        print(f"Failed to save allowed users list: {e}")
+
+def is_authorized(user_id):
+    if user_id == OWNER_ID:
+        return True
+    allowed = load_allowed_users()
+    return user_id in allowed
+
+# --- HEADLESS CHROMEDRIVER OPTIONS FACTORY ---
+def get_chrome_options():
     options = uc.ChromeOptions()
     options.add_argument("--start-maximized")
-    
     is_cloud = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
     if is_cloud:
-        print("Cloud server detected. Initializing Headless Chrome options...")
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -36,262 +63,169 @@ def fetch_otp_from_outlook(email, password):
         options.add_argument("--no-service-autorun")
         options.add_argument("--password-store=basic")
         options.add_argument("--use-gl=swiftshader")
-        # Disable loading of images to save over 60% RAM and CPU usage
         options.add_argument("--blink-settings=imagesEnabled=false")
-        # Cap Javascript heap memory to 256MB to strictly prevent Railway 512MB Free Tier OOM Crashes
         options.add_argument("--js-flags=--max-old-space-size=256")
-        
+    return options
+
+# --- SELENIUM WORKERS ---
+
+def fetch_otp_from_outlook(email, password):
+    options = get_chrome_options()
+    is_cloud = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
+    if is_cloud:
         driver = uc.Chrome(options=options)
     else:
-        print("Local Windows machine detected. Starting Chrome in standard GUI mode...")
         driver = uc.Chrome(options=options, version_main=147)
         
     wait = WebDriverWait(driver, 35)
     
     try:
-        # Navigate to Outlook login page
         driver.get(URL)
-        print("Navigated to Outlook URL successfully.")
+        print("Navigated to Outlook login page.")
         
-        # 1. Enter email
         email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
         email_input.clear()
         email_input.send_keys(email)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
+        wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9"))).click()
         
-        next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
-        next_btn.click()
-        print("Email submitted.")
-        
-        # 2. Enter password
         password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
         password_input.clear()
         password_input.send_keys(password)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']"))).click()
         
-        submit_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']")))
-        submit_btn.click()
-        print("Password submitted.")
-        
-        # 3. Handle security / passkey prompts
         time.sleep(2)
-        for i in range(7):
+        for i in range(5):
             try:
-                cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel'] | //input[@value='Cancel'] | //*[contains(text(), 'Cancel')]")
-                passkey_header = driver.find_elements(By.XPATH, "//*[contains(text(), 'Setting up your passkey') or contains(text(), 'passkey')]")
-                
-                if cancel_btns and (cancel_btns[0].is_displayed() or (passkey_header and len(passkey_header) > 0)):
+                cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel']")
+                if cancel_btns:
                     cancel_btns[0].click()
-                    print(f"Clicked Microsoft Passkey 'Cancel' (Attempt {i+1})!")
-                    time.sleep(3)
+                    time.sleep(2)
                     continue
-                
                 skip_btns = driver.find_elements(By.ID, "iShowSkip")
                 if skip_btns and skip_btns[0].is_displayed():
                     skip_btns[0].click()
-                    print("Clicked 'Skip for now'.")
                     time.sleep(2)
                 else:
-                    skip_btns_xpath = driver.find_elements(By.XPATH, "//*[contains(@id, 'iShowSkip') or contains(text(), 'Skip for now')]")
-                    if skip_btns_xpath and skip_btns_xpath[0].is_displayed():
-                        skip_btns_xpath[0].click()
-                        print("Clicked 'Skip for now' via XPath.")
-                        time.sleep(2)
-                    else:
-                        break
-            except Exception as e_skip:
-                print(f"Skip/Cancel iteration {i+1} handled exception: {e_skip}")
+                    break
+            except:
                 break
                 
-        # 4. Handle "Stay signed in"
-        print("Checking stay signed in...")
         try:
-            no_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']")))
-            no_btn.click()
-            print("Clicked 'No' on 'Stay signed in' prompt.")
-        except Exception:
-            try:
-                no_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'No') or contains(text(), 'no')]")))
-                no_btn.click()
-                print("Clicked 'No' on 'Stay signed in' via text match.")
-            except Exception as stay_signed_err:
-                print("Stay signed in prompt did not appear or failed:", stay_signed_err)
-                
-        # 5. Search inbox for ChatGPT code
-        print("Inbox loaded successfully. Scanning for ChatGPT verification emails...")
+            wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']"))).click()
+        except:
+            pass
+            
+        print("Outlook logged in. Scanning for ChatGPT verification code...")
         time.sleep(3)
         
-        # We try to search and scan for up to 2 minutes (waiting for the email to arrive)
-        start_search_time = time.time()
+        start_time = time.time()
         extracted_otp = None
         
-        while time.time() - start_search_time < 120:
+        while time.time() - start_time < 120:
             try:
-                # Type query in Outlook search
                 search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
                 search_input.click()
                 search_input.clear()
                 search_input.send_keys("chatgpt code")
                 search_input.send_keys("\n")
-                print("Submitted search query.")
                 time.sleep(3)
                 
-                # Check matching email items
                 items = driver.find_elements(By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")
                 if items:
-                    print(f"Found {len(items)} matching emails in search results.")
-                    
-                    # Scan the top 3 matching emails
                     for item in items[:3]:
                         text = item.text or ""
                         aria_label = item.get_attribute("aria-label") or ""
                         combined_text = (text + " " + aria_label).lower()
                         
                         if "chatgpt" in combined_text or "openai" in combined_text or "verification" in combined_text:
-                            # Level 1: Match 6-digit code directly from email preview text
                             match = re.search(r'\b\d{6}\b', combined_text)
                             if match:
                                 extracted_otp = match.group(0)
-                                print(f"✓ Found OTP in email list preview: {extracted_otp}")
                                 return extracted_otp, driver
                                 
-                            # Level 2: Click the email to read full body
                             item.click()
-                            print("Clicked email to load full content...")
                             time.sleep(3)
                             
-                            # Read OTP inside standard Menlo/Monaco code block
                             try:
                                 elements = driver.find_elements(By.XPATH, "//*[contains(@style, 'Menlo') or contains(@style, 'Monaco') or contains(@style, 'F3F3F3')]")
                                 for elem in elements:
-                                    text_val = elem.text.strip()
-                                    if len(text_val) == 6 and text_val.isdigit():
-                                        extracted_otp = text_val
-                                        print(f"✓ Extracted OTP from open email block: {extracted_otp}")
-                                        return extracted_otp, driver
-                            except Exception:
+                                    val = elem.text.strip()
+                                    if len(val) == 6 and val.isdigit():
+                                        return val, driver
+                            except:
                                 pass
-                                
-                            # Level 3: Regex match search inside full body text
+                            
                             try:
-                                page_text = driver.find_element(By.TAG_NAME, "body").text
-                                match = re.search(r'(?:code|continue|verification):\s*(\d{6})', page_text, re.IGNORECASE)
+                                body_text = driver.find_element(By.TAG_NAME, "body").text
+                                match = re.search(r'(?:code|continue|verification):\s*(\d{6})', body_text, re.IGNORECASE)
                                 if match:
-                                    extracted_otp = match.group(1)
-                                    print(f"✓ Extracted OTP via body regex: {extracted_otp}")
-                                    return extracted_otp, driver
+                                    return match.group(1), driver
                                 else:
-                                    matches = re.findall(r'\b\d{6}\b', page_text)
+                                    matches = re.findall(r'\b\d{6}\b', body_text)
                                     if matches:
-                                        extracted_otp = matches[0]
-                                        print(f"✓ Extracted first 6-digit match in body: {extracted_otp}")
-                                        return extracted_otp, driver
-                            except Exception:
+                                        return matches[0], driver
+                            except:
                                 pass
-            except Exception as loop_err:
-                print(f"Error in search loop: {loop_err}")
-                
+            except:
+                pass
             time.sleep(5)
             
-        print("[-] Verification email not found within 120 seconds.")
         return None, driver
-        
     except Exception as e:
-        print(f"Execution failed: {e}")
+        print(f"OTP extraction failed: {e}")
         return None, driver
 
 
 def check_chatgpt_plus_in_outlook(email, password):
-    options = uc.ChromeOptions()
-    options.add_argument("--start-maximized")
-    
+    options = get_chrome_options()
     is_cloud = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
     if is_cloud:
-        print("Cloud server detected. Initializing Headless Chrome options...")
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--disable-default-apps")
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-service-autorun")
-        options.add_argument("--password-store=basic")
-        options.add_argument("--use-gl=swiftshader")
-        options.add_argument("--blink-settings=imagesEnabled=false")
-        options.add_argument("--js-flags=--max-old-space-size=256")
         driver = uc.Chrome(options=options)
     else:
-        print("Local Windows machine detected. Starting Chrome in standard GUI mode...")
         driver = uc.Chrome(options=options, version_main=147)
         
     wait = WebDriverWait(driver, 35)
     
     try:
-        # Navigate to Outlook login page
         driver.get(URL)
-        print("Navigated to Outlook URL successfully.")
         
-        # 1. Enter email
         email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
         email_input.clear()
         email_input.send_keys(email)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
+        wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9"))).click()
         
-        next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
-        next_btn.click()
-        print("Email submitted.")
-        
-        # 2. Enter password
         password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
         password_input.clear()
         password_input.send_keys(password)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']"))).click()
         
-        submit_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']")))
-        submit_btn.click()
-        print("Password submitted.")
-        
-        # 3. Handle security / passkey prompts
         time.sleep(2)
-        for i in range(7):
+        for i in range(5):
             try:
-                cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel'] | //input[@value='Cancel'] | //*[contains(text(), 'Cancel')]")
-                passkey_header = driver.find_elements(By.XPATH, "//*[contains(text(), 'Setting up your passkey') or contains(text(), 'passkey')]")
-                
-                if cancel_btns and (cancel_btns[0].is_displayed() or (passkey_header and len(passkey_header) > 0)):
+                cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel']")
+                if cancel_btns:
                     cancel_btns[0].click()
-                    time.sleep(3)
+                    time.sleep(2)
                     continue
-                
                 skip_btns = driver.find_elements(By.ID, "iShowSkip")
                 if skip_btns and skip_btns[0].is_displayed():
                     skip_btns[0].click()
                     time.sleep(2)
                 else:
-                    skip_btns_xpath = driver.find_elements(By.XPATH, "//*[contains(@id, 'iShowSkip') or contains(text(), 'Skip for now')]")
-                    if skip_btns_xpath and skip_btns_xpath[0].is_displayed():
-                        skip_btns_xpath[0].click()
-                        time.sleep(2)
-                    else:
-                        break
-            except Exception:
+                    break
+            except:
                 break
                 
-        # 4. Handle "Stay signed in"
         try:
-            no_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']")))
-            no_btn.click()
-        except Exception:
-            try:
-                no_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'No') or contains(text(), 'no')]")))
-                no_btn.click()
-            except Exception:
-                pass
-                
-        # 5. Search inbox for ChatGPT Plus / Subscription / Invoice keys
-        print("Inbox loaded. Searching for subscription / invoice indicators...")
+            wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']"))).click()
+        except:
+            pass
+            
+        print("Outlook logged in. Searching for subscription / invoice keywords...")
         time.sleep(3)
         
         search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
@@ -299,29 +233,23 @@ def check_chatgpt_plus_in_outlook(email, password):
         search_input.clear()
         search_input.send_keys("chatgpt plus")
         search_input.send_keys("\n")
-        print("Searched for 'chatgpt plus'.")
         time.sleep(4)
         
-        # Check if matching emails exist
         items = driver.find_elements(By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")
         if items:
             for item in items[:5]:
                 text = (item.text or "").lower()
                 aria_label = (item.get_attribute("aria-label") or "").lower()
                 combined_text = text + " " + aria_label
-                
-                # If we find ChatGPT Plus activation or recurring billing confirmation
                 if "chatgpt plus" in combined_text or "subscription" in combined_text or "receipt" in combined_text or "invoice" in combined_text or "payment" in combined_text:
-                    print("✓ ChatGPT Plus subscription indicator found in email subject/preview!")
                     return "Subscribed", driver
-        
-        # Secondary check: search for "openai" or "stripe" to be completely bulletproof
+                    
+        # Secondary check
         search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
         search_input.click()
         search_input.clear()
         search_input.send_keys("openai subscription")
         search_input.send_keys("\n")
-        print("Secondary check: Searched for 'openai subscription'.")
         time.sleep(4)
         
         items = driver.find_elements(By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")
@@ -330,17 +258,176 @@ def check_chatgpt_plus_in_outlook(email, password):
                 text = (item.text or "").lower()
                 aria_label = (item.get_attribute("aria-label") or "").lower()
                 combined_text = text + " " + aria_label
-                
                 if "openai" in combined_text and ("subscription" in combined_text or "payment" in combined_text or "receipt" in combined_text or "invoice" in combined_text or "plus" in combined_text):
-                    print("✓ OpenAI subscription indicator found in secondary search!")
                     return "Subscribed", driver
                     
-        print("[-] No subscription indicator found.")
         return "Not Subscribed", driver
-        
     except Exception as e:
-        print(f"Check execution failed: {e}")
+        print(f"Check failed: {e}")
         return "Error", driver
+
+
+def run_full_access_token_flow(email, password):
+    options = get_chrome_options()
+    is_cloud = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
+    if is_cloud:
+        driver = uc.Chrome(options=options)
+    else:
+        driver = uc.Chrome(options=options, version_main=147)
+        
+    wait = WebDriverWait(driver, 35)
+    
+    try:
+        # 1. Log into Outlook
+        driver.get(URL)
+        original_window = driver.current_window_handle
+        
+        email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
+        email_input.clear()
+        email_input.send_keys(email)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
+        wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9"))).click()
+        
+        password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
+        password_input.clear()
+        password_input.send_keys(password)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']"))).click()
+        
+        time.sleep(2)
+        for i in range(5):
+            try:
+                cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel']")
+                if cancel_btns:
+                    cancel_btns[0].click()
+                    time.sleep(2)
+                    continue
+                skip_btns = driver.find_elements(By.ID, "iShowSkip")
+                if skip_btns and skip_btns[0].is_displayed():
+                    skip_btns[0].click()
+                    time.sleep(2)
+                else:
+                    break
+            except:
+                break
+                
+        try:
+            wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']"))).click()
+        except:
+            pass
+            
+        # 2. Open ChatGPT and start login
+        driver.switch_to.new_window('tab')
+        chatgpt_window = driver.current_window_handle
+        driver.get("https://chatgpt.com/")
+        time.sleep(4)
+        
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='login-button']"))).click()
+        
+        chatgpt_email = wait.until(EC.element_to_be_clickable((By.ID, "email")))
+        chatgpt_email.clear()
+        chatgpt_email.send_keys(email)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", chatgpt_email)
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))).click()
+        time.sleep(4)
+        
+        # 3. Switch back to Outlook and grab OTP
+        driver.switch_to.window(original_window)
+        extracted_otp = None
+        start_time = time.time()
+        
+        while time.time() - start_time < 90:
+            try:
+                search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
+                search_input.click()
+                search_input.clear()
+                search_input.send_keys("chatgpt code")
+                search_input.send_keys("\n")
+                time.sleep(3)
+                
+                items = driver.find_elements(By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")
+                if items:
+                    for item in items[:2]:
+                        text = (item.text or "").lower()
+                        aria_label = (item.get_attribute("aria-label") or "").lower()
+                        combined_text = text + " " + aria_label
+                        if "chatgpt" in combined_text or "openai" in combined_text:
+                            match = re.search(r'\b\d{6}\b', combined_text)
+                            if match:
+                                extracted_otp = match.group(0)
+                                break
+                    if extracted_otp:
+                        break
+            except:
+                pass
+            time.sleep(5)
+            
+        if not extracted_otp:
+            return None, driver
+            
+        # 4. Switch back to ChatGPT and enter OTP
+        driver.switch_to.window(chatgpt_window)
+        for index, digit in enumerate(extracted_otp):
+            input_field = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, f"input[data-index='{index}']")))
+            input_field.clear()
+            input_field.send_keys(digit)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", input_field)
+        time.sleep(5)
+        
+        # 5. Onboarding name and age filling
+        try:
+            first_name_input = WebDriverWait(driver, 8).until(EC.element_to_be_clickable((By.ID, "first_name")))
+            first_name_input.clear()
+            first_name_input.send_keys("Alex")
+            
+            last_name_input = driver.find_element(By.ID, "last_name")
+            last_name_input.clear()
+            last_name_input.send_keys("Smith")
+            
+            for btn_sel in ["button[type='submit']", "form button", "button"]:
+                try:
+                    driver.find_element(By.CSS_SELECTOR, btn_sel).click()
+                    break
+                except:
+                    pass
+            time.sleep(4)
+        except:
+            pass
+            
+        try:
+            month_input = WebDriverWait(driver, 8).until(EC.element_to_be_clickable((By.ID, "birthdate-month")))
+            month_input.clear()
+            month_input.send_keys("05")
+            
+            day_input = driver.find_element(By.ID, "birthdate-day")
+            day_input.clear()
+            day_input.send_keys("15")
+            
+            year_input = driver.find_element(By.ID, "birthdate-year")
+            year_input.clear()
+            year_input.send_keys("1998")
+            
+            for btn_sel in ["button[type='submit']", "form button", "button"]:
+                try:
+                    driver.find_element(By.CSS_SELECTOR, btn_sel).click()
+                    break
+                except:
+                    pass
+            time.sleep(6)
+        except:
+            pass
+            
+        # 6. Open session JSON
+        driver.switch_to.new_window('tab')
+        driver.get("https://chatgpt.com/api/auth/session")
+        time.sleep(4)
+        
+        pre_element = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "pre")))
+        session_text = pre_element.text
+        return session_text, driver
+    except Exception as e:
+        print(f"Access flow failed: {e}")
+        return None, driver
 
 
 # --- DISCORD BOT SETUP ---
@@ -349,7 +436,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
-async def on_ready():
+def on_ready():
     print(f"🤖 Bot is logged in and ready as: {bot.user}")
 
 def parse_credentials(ctx, user_input):
@@ -367,8 +454,95 @@ def parse_multiple_credentials(user_input):
             accounts.append((email.strip(), password.strip()))
     return accounts
 
-# Primary Command: !otp
+def extract_userid(user_input):
+    match = re.search(r'\d+', user_input)
+    return int(match.group(0)) if match else None
+
+# --- PERMISSION PROTECTION WRAPPER ---
+def check_authorization(ctx):
+    if not is_authorized(ctx.author.id):
+        raise commands.CheckFailure("❌ **Access Denied!** You do not have permission to run bot commands.")
+    return True
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send(str(error))
+    else:
+        print(f"Error executing command: {error}")
+
+# --- USER MANAGEMENT COMMANDS (OWNER ONLY) ---
+
+@bot.command(name="adduser")
+async def adduser_command(ctx, *, user_input: str = ""):
+    """Add a Discord User ID to the allowed users list (Owner Only)"""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send("❌ **Access Denied!** Only the bot Owner can run this command.")
+        return
+        
+    target_id = extract_userid(user_input)
+    if not target_id:
+        await ctx.send("⚠️ **Invalid format!** Please use: `!adduser @user` or `!adduser <discorduserid>`")
+        return
+        
+    allowed_list = load_allowed_users()
+    if target_id in allowed_list:
+        await ctx.send(f"ℹ️ User <@{target_id}> is already in the allowed list.")
+        return
+        
+    allowed_list.append(target_id)
+    save_allowed_users(allowed_list)
+    await ctx.send(f"✅ **[Access Granted]** User <@{target_id}> (ID: `{target_id}`) has been successfully authorized to run bot commands!")
+
+@bot.command(name="removeuser")
+async def removeuser_command(ctx, *, user_input: str = ""):
+    """Remove a Discord User ID from the allowed users list (Owner Only)"""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send("❌ **Access Denied!** Only the bot Owner can run this command.")
+        return
+        
+    target_id = extract_userid(user_input)
+    if not target_id:
+        await ctx.send("⚠️ **Invalid format!** Please use: `!removeuser @user` or `!removeuser <discorduserid>`")
+        return
+        
+    allowed_list = load_allowed_users()
+    if target_id not in allowed_list:
+        await ctx.send(f"⚠️ User <@{target_id}> is not in the allowed list.")
+        return
+        
+    allowed_list.remove(target_id)
+    save_allowed_users(allowed_list)
+    await ctx.send(f"❌ **[Access Revoked]** User <@{target_id}> (ID: `{target_id}`) has been removed from authorized access.")
+
+@bot.command(name="listusers")
+async def listusers_command(ctx):
+    """List all authorized Discord User IDs (Owner Only)"""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send("❌ **Access Denied!** Only the bot Owner can run this command.")
+        return
+        
+    allowed_list = load_allowed_users()
+    report = []
+    report.append("📋 **Authorized Discord Users List:**")
+    report.append("="*40)
+    report.append(f"👑 **Owner:** <@{OWNER_ID}> (ID: `{OWNER_ID}`)")
+    
+    if allowed_list:
+        report.append(f"👤 **Allowed Users [{len(allowed_list)}]:**")
+        for u_id in allowed_list:
+            report.append(f"• <@{u_id}> (ID: `{u_id}`)")
+    else:
+        report.append("👤 *No extra users have been added yet.*")
+        
+    report.append("="*40)
+    await ctx.send("\n".join(report))
+
+
+# --- PRIMARY WORKER BOT COMMANDS (PROTECTED) ---
+
 @bot.command(name="otp")
+@commands.check(check_authorization)
 async def otp_command(ctx, *, credentials: str = ""):
     """Log in to Outlook and automatically fetch the latest 6-digit ChatGPT OTP / verification code"""
     email, password = parse_credentials(ctx, credentials)
@@ -381,11 +555,8 @@ async def otp_command(ctx, *, credentials: str = ""):
     async with bot_semaphore:
         local_driver = None
         try:
-            # Run Selenium in a background thread
             otp_code, local_driver = await asyncio.to_thread(fetch_otp_from_outlook, email, password)
-            
             if otp_code:
-                # Output OTP code in a separate single backtick line for seamless one-tap copying
                 await ctx.send(f"🎉 **[OTP Retrieval Successful]**")
                 await ctx.send(f"🔑 **Verification Code (Tap to copy):**")
                 await ctx.send(f"`{otp_code}`")
@@ -397,12 +568,11 @@ async def otp_command(ctx, *, credentials: str = ""):
             if local_driver:
                 try:
                     local_driver.quit()
-                    print("Chrome driver terminated successfully.")
                 except:
                     pass
 
-# Verification Command: !check (Supports Multi-Account Checks)
 @bot.command(name="check")
+@commands.check(check_authorization)
 async def check_command(ctx, *, credentials: str = ""):
     """Log in to Outlook and check one or multiple accounts for ChatGPT Plus subscription history"""
     accounts = parse_multiple_credentials(credentials)
@@ -424,7 +594,6 @@ async def check_command(ctx, *, credentials: str = ""):
             local_driver = None
             try:
                 status, local_driver = await asyncio.to_thread(check_chatgpt_plus_in_outlook, email, password)
-                
                 if status == "Subscribed":
                     subscribed_list.append(email)
                 elif status == "Not Subscribed":
@@ -438,11 +607,9 @@ async def check_command(ctx, *, credentials: str = ""):
                 if local_driver:
                     try:
                         local_driver.quit()
-                        print(f"Chrome driver for {email} terminated.")
                     except:
                         pass
                         
-    # Build a consolidated final summary report
     report = []
     report.append("📋 **ChatGPT Plus Verification Summary Report:**")
     report.append("="*45)
@@ -454,14 +621,14 @@ async def check_command(ctx, *, credentials: str = ""):
             
     if not_subscribed_list:
         if len(report) > 2:
-            report.append("")  # Spacer
+            report.append("")
         report.append(f"❌ **Not Subscribed [{len(not_subscribed_list)}]:**")
         for email in not_subscribed_list:
             report.append(f"• `{email}`")
             
     if failed_list:
         if len(report) > 2:
-            report.append("")  # Spacer
+            report.append("")
         report.append(f"⚠️ **Check Failed / Errors [{len(failed_list)}]:**")
         for email in failed_list:
             report.append(f"• `{email}`")
@@ -470,8 +637,6 @@ async def check_command(ctx, *, credentials: str = ""):
     report.append("✓ *All checks complete.*")
     
     final_report_text = "\n".join(report)
-    
-    # Send report (split/file attachment handling for very long bulk checks)
     if len(final_report_text) > 2000:
         import io
         file_data = io.BytesIO(final_report_text.encode('utf-8'))
@@ -484,6 +649,49 @@ async def check_command(ctx, *, credentials: str = ""):
     except:
         pass
 
+@bot.command(name="access")
+@commands.check(check_authorization)
+async def access_command(ctx, *, credentials: str = ""):
+    """Log in to Outlook, authenticate ChatGPT, and retrieve the full access token block"""
+    email, password = parse_credentials(ctx, credentials)
+    if not email or not password:
+        await ctx.send("⚠️ **Invalid format!** Please use: `!access email:password`")
+        return
+        
+    await ctx.send(f"⏳ **[Outlook Access]** Logging into `{email}` and authenticating ChatGPT session token...")
+    
+    async with bot_semaphore:
+        local_driver = None
+        try:
+            session_json, local_driver = await asyncio.to_thread(run_full_access_token_flow, email, password)
+            if session_json:
+                try:
+                    session_data = json.loads(session_json)
+                    access_token = session_data.get("accessToken", "")
+                except Exception:
+                    access_token = ""
+                    
+                await ctx.send(f"🎉 **[Access Token Retrieval Successful]**")
+                if access_token:
+                    await ctx.send("📋 **Access Token (Tap to copy):**")
+                    await ctx.send(f"`{access_token}`")
+                    
+                import io
+                file_data = io.BytesIO(session_json.encode('utf-8'))
+                await ctx.send("📄 **Full Session Details:**", file=discord.File(file_data, "session.json"))
+            else:
+                await ctx.send(f"❌ **[Access Token Failed]** Could not retrieve session data. Please ensure credentials are correct and try again.")
+        except Exception as err:
+            await ctx.send(f"⚠️ **[Access Token Error]** An unexpected exception occurred: `{err}`")
+        finally:
+            if local_driver:
+                try:
+                    local_driver.quit()
+                except:
+                    pass
+
+
+# --- RAILWAY HEALTH CHECK PORT LISTENER ---
 def start_health_check_server():
     import http.server
     import socketserver
@@ -497,7 +705,7 @@ def start_health_check_server():
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
         def log_message(self, format, *args):
-            pass # Suppress noisy server logs
+            pass # Suppress server noise
             
     try:
         server = socketserver.TCPServer(("", port), HealthCheckHandler)
@@ -506,7 +714,7 @@ def start_health_check_server():
     except Exception as e:
         print(f"Failed to start Railway Health Check server: {e}")
 
-# --- RUN BOT ---
+# --- START BOT ---
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:

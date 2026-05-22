@@ -69,56 +69,64 @@ def get_chrome_options():
     return options
 
 def create_driver(options):
-    is_cloud = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
-    if is_cloud:
-        print("Running in cloud/headless environment. Initializing Chrome driver...")
-        return uc.Chrome(options=options)
-    
-    # On Windows, try auto-detection first
+    # Try auto-detect first
     try:
-        print("Initializing Chrome driver (auto-detect version)...")
+        print("Initializing Chrome driver (auto-detect)...")
         return uc.Chrome(options=options)
     except Exception as e:
-        print(f"Auto-detect failed: {e}. Trying dynamically resolved version...")
+        err_msg = str(e)
+        print(f"Auto-detect failed: {err_msg}")
         
-    # Get dynamic Chrome version via registry
-    major_version = None
-    try:
-        import winreg
-        reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
-        version, _ = winreg.QueryValueEx(reg_key, "version")
-        winreg.CloseKey(reg_key)
-        major_version = int(version.split(".")[0])
-        print(f"Detected Chrome major version: {major_version} (HKCU)")
-    except Exception:
-        try:
-            import winreg
-            reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon")
-            version, _ = winreg.QueryValueEx(reg_key, "version")
-            winreg.CloseKey(reg_key)
-            major_version = int(version.split(".")[0])
-            print(f"Detected Chrome major version: {major_version} (HKLM)")
-        except Exception:
-            pass
+        # Self-healing: Parse the version from the error message if possible
+        # e.g., "Current browser version is 148.0.7778.178"
+        match = re.search(r"Current browser version is (\d+)", err_msg)
+        if match:
+            detected_ver = int(match.group(1))
+            print(f"Self-Healing: Detected Chrome version {detected_ver} from error. Retrying...")
+            try:
+                return uc.Chrome(options=options, version_main=detected_ver)
+            except Exception as retry_err:
+                print(f"Self-Healing retry failed for version {detected_ver}: {retry_err}")
 
-    if major_version:
-        try:
-            print(f"Initializing Chrome driver with version_main={major_version}...")
-            return uc.Chrome(options=options, version_main=major_version)
-        except Exception as e:
-            print(f"Failed with version_main={major_version}: {e}")
+        # On Windows, try registry lookup
+        if os.name == 'nt':
+            major_version = None
+            try:
+                import winreg
+                reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
+                version, _ = winreg.QueryValueEx(reg_key, "version")
+                winreg.CloseKey(reg_key)
+                major_version = int(version.split(".")[0])
+                print(f"Detected Chrome major version: {major_version} (HKCU)")
+            except Exception:
+                try:
+                    import winreg
+                    reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon")
+                    version, _ = winreg.QueryValueEx(reg_key, "version")
+                    winreg.CloseKey(reg_key)
+                    major_version = int(version.split(".")[0])
+                    print(f"Detected Chrome major version: {major_version} (HKLM)")
+                except Exception:
+                    pass
 
-    # Fallback to common versions
-    for ver in [148, 147]:
-        try:
-            print(f"Initializing Chrome driver with version_main={ver}...")
-            return uc.Chrome(options=options, version_main=ver)
-        except Exception:
-            pass
+            if major_version:
+                try:
+                    print(f"Initializing Chrome driver with version_main={major_version}...")
+                    return uc.Chrome(options=options, version_main=major_version)
+                except Exception as reg_err:
+                    print(f"Failed with version_main={major_version}: {reg_err}")
 
-    # If all else fails, try one last time with no arguments to let the error propagate
-    print("All Chrome driver initialization attempts failed. Trying final fallback...")
-    return uc.Chrome(options=options)
+        # Fallback to common versions
+        for ver in [148, 147, 149]:
+            try:
+                print(f"Initializing Chrome driver with fallback version_main={ver}...")
+                return uc.Chrome(options=options, version_main=ver)
+            except Exception:
+                pass
+
+        # If all else fails, try one last time to let the error propagate
+        print("All Chrome driver initialization attempts failed. Trying final fallback...")
+        return uc.Chrome(options=options)
 
 # --- SELENIUM WORKERS ---
 
@@ -132,17 +140,17 @@ def fetch_otp_from_outlook(email, password):
         driver.get(URL)
         print("Navigated to Outlook login page.")
         
-        email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
+        email_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='i0116'] | //input[@name='loginfmt'] | //input[@type='email']")))
         email_input.clear()
         email_input.send_keys(email)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
-        wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9"))).click()
+        wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
         
-        password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
+        password_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='passwordEntry'] | //input[@id='i0118'] | //input[@name='passwd'] | //input[@type='password']")))
         password_input.clear()
         password_input.send_keys(password)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']"))).click()
+        wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='primaryButton'] | //input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
         
         time.sleep(2)
         for i in range(7):
@@ -249,17 +257,17 @@ def check_chatgpt_plus_in_outlook(email, password):
     try:
         driver.get(URL)
         
-        email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
+        email_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='i0116'] | //input[@name='loginfmt'] | //input[@type='email']")))
         email_input.clear()
         email_input.send_keys(email)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
-        wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9"))).click()
+        wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
         
-        password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
+        password_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='passwordEntry'] | //input[@id='i0118'] | //input[@name='passwd'] | //input[@type='password']")))
         password_input.clear()
         password_input.send_keys(password)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']"))).click()
+        wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='primaryButton'] | //input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
         
         time.sleep(2)
         for i in range(7):
@@ -336,7 +344,7 @@ def check_chatgpt_plus_in_outlook(email, password):
         return "Not Subscribed", driver
     except Exception as e:
         print(f"Check failed: {e}")
-        return "Error", driver
+        return f"Error: {str(e).splitlines()[0]}", driver
 
 
 def run_full_access_token_flow(email, password):
@@ -350,17 +358,17 @@ def run_full_access_token_flow(email, password):
         driver.get(URL)
         original_window = driver.current_window_handle
         
-        email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
+        email_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='i0116'] | //input[@name='loginfmt'] | //input[@type='email']")))
         email_input.clear()
         email_input.send_keys(email)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
-        wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9"))).click()
+        wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
         
-        password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
+        password_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='passwordEntry'] | //input[@id='i0118'] | //input[@name='passwd'] | //input[@type='password']")))
         password_input.clear()
         password_input.send_keys(password)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']"))).click()
+        wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='primaryButton'] | //input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
         
         time.sleep(2)
         for i in range(7):
@@ -679,11 +687,13 @@ async def check_command(ctx, *, credentials: str = ""):
                     subscribed_list.append(email)
                 elif status == "Not Subscribed":
                     not_subscribed_list.append(email)
+                elif status.startswith("Error:"):
+                    failed_list.append((email, status[6:]))
                 else:
-                    failed_list.append(email)
+                    failed_list.append((email, "Unknown Status"))
             except Exception as err:
                 print(f"Error checking {email}: {err}")
-                failed_list.append(email)
+                failed_list.append((email, str(err).splitlines()[0]))
             finally:
                 if local_driver:
                     try:
@@ -711,8 +721,8 @@ async def check_command(ctx, *, credentials: str = ""):
         if len(report) > 2:
             report.append("")
         report.append(f"⚠️ **Check Failed / Errors [{len(failed_list)}]:**")
-        for email in failed_list:
-            report.append(f"• `{email}`")
+        for email, reason in failed_list:
+            report.append(f"• `{email}` (Reason: *{reason}*)")
             
     report.append("="*45)
     report.append("✓ *All checks complete.*")
@@ -772,35 +782,11 @@ async def access_command(ctx, *, credentials: str = ""):
                     pass
 
 
-# --- RAILWAY HEALTH CHECK PORT LISTENER ---
-def start_health_check_server():
-    import http.server
-    import socketserver
-    import threading
-    
-    port = int(os.getenv("PORT", 8080))
-    class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok"}')
-        def log_message(self, format, *args):
-            pass # Suppress server noise
-            
-    try:
-        server = socketserver.TCPServer(("", port), HealthCheckHandler)
-        print(f"Railway Health Check server started on port {port}")
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-    except Exception as e:
-        print(f"Failed to start Railway Health Check server: {e}")
-
 # --- START BOT ---
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         print("ERROR: DISCORD_TOKEN is missing! Please set it in your .env file.")
     else:
-        start_health_check_server()
         print("Starting Discord Bot...")
         bot.run(token)

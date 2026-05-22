@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y \
     rm google-chrome-stable_current_amd64.deb && \
     rm -rf /var/lib/apt/lists/*
 
-
 # Set environment variable to flag Docker environment
 ENV DOCKER_ENV=true
 

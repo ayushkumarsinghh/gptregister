@@ -257,29 +257,28 @@ def fetch_otp_from_outlook(email, password):
         
         while time.time() - start_time < 120:
             try:
-                search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
-                search_input.click()
-                search_input.send_keys(Keys.CONTROL + "a")
-                search_input.send_keys(Keys.BACKSPACE)
-                search_input.send_keys("chatgpt code")
-                search_input.send_keys("\n")
-                time.sleep(3)
+                # Force refresh the inbox page to get the absolute latest emails instantly
+                driver.get("https://outlook.live.com/mail/0/inbox")
+                time.sleep(5)
                 
                 items = driver.find_elements(By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")
                 if items:
-                    for item in items[:3]:
+                    for item in items[:5]:
                         text = item.text or ""
                         aria_label = item.get_attribute("aria-label") or ""
                         combined_text = (text + " " + aria_label).lower()
                         
-                        if "chatgpt" in combined_text or "openai" in combined_text or "verification" in combined_text:
+                        if "chatgpt" in combined_text or "openai" in combined_text or "verification" in combined_text or "temporary login" in combined_text:
+                            # 1. Try extracting 6-digit code directly from preview
                             match = re.search(r'\b\d{6}\b', combined_text)
                             if match:
                                 extracted_otp = match.group(0)
+                                print(f"Found code directly in email preview: {extracted_otp}")
                                 return extracted_otp, driver
                                 
+                            # 2. Click to open email if not in preview
                             item.click()
-                            time.sleep(3)
+                            time.sleep(4)
                             
                             try:
                                 elements = driver.find_elements(By.XPATH, "//*[contains(@style, 'Menlo') or contains(@style, 'Monaco') or contains(@style, 'F3F3F3')]")
@@ -301,8 +300,8 @@ def fetch_otp_from_outlook(email, password):
                                         return matches[0], driver
                             except:
                                 pass
-            except:
-                pass
+            except Exception as scan_err:
+                print(f"Error during inbox scanning: {scan_err}")
             time.sleep(5)
             
         return None, driver

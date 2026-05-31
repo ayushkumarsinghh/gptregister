@@ -1228,9 +1228,13 @@ if __name__ == "__main__":
         threading.Thread(target=run_http_server, args=(port,), daemon=True).start()
         threading.Thread(target=keep_awake, daemon=True).start()
 
-    BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+    BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
     if not BOT_TOKEN:
-        print("[Error] DISCORD_TOKEN is missing! Please set it in your .env file.")
+        print("[Error] Discord Bot Token not found! Please set the DISCORD_TOKEN or BOT_TOKEN environment variable in your Railway dashboard or .env file.")
         sys.exit(1)
+    
+    # Mask and log the loaded token for verification
+    masked_token = BOT_TOKEN[:10] + "..." if len(BOT_TOKEN) > 10 else BOT_TOKEN
+    print(f"[System] Bot Token successfully loaded: {masked_token}")
     print("Starting Outlook and ChatGPT Onboarding Bot...")
     bot.run(BOT_TOKEN)

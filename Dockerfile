@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
 
 # Set environment variable to flag Docker environment
 ENV DOCKER_ENV=true
+ENV PYTHONUNBUFFERED=1
 
 # Set working directory
 WORKDIR /app

@@ -1,8 +1,9 @@
 FROM python:3.10-slim
 
-# Install system core utilities, Xvfb for headful browser support, and Google Chrome stable
+# Install system core utilities, Xvfb and xauth for headful browser support, and Google Chrome stable
 RUN apt-get update && apt-get install -y \
     xvfb \
+    xauth \
     wget \
     gnupg \
     curl \

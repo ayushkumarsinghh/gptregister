@@ -118,6 +118,7 @@ def create_driver(options=None):
             
         # If we failed to get it from error but we are on Linux, try finding it via command line
         if not detected_ver:
+
             try:
                 import subprocess
                 out = subprocess.check_output(["google-chrome", "--version"]).decode("utf-8")
@@ -662,7 +663,7 @@ async def check_command(ctx, *, credentials: str = ""):
         pass
 
 
-
+        
 
 # --- START BOT ---
 if __name__ == "__main__":

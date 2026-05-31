@@ -14,7 +14,11 @@ from discord.ext import commands
 import asyncio
 import traceback
 import threading
-
+import http.server
+import socketserver
+import ssl
+import urllib.request
+import gc
 # Load standard .env file manually if it exists
 if os.path.exists(".env"):
     with open(".env", "r") as f:
@@ -27,13 +31,15 @@ if os.path.exists(".env"):
 # --- CONFIG ---
 URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=9199bf20-a13f-4107-85dc-02114787ef48&scope=https%3A%2F%2Foutlook.office.com%2F.default%20openid%20profile%20offline_access&redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&client-request-id=85af84fb-4838-c204-f618-76e540231109&response_mode=fragment&client_info=1&prompt=select_account&nonce=019e35f5-4ebc-7f28-8e36-611bb37f46ef&state=eyJpZCI6IjAxOWUzNWY1LTRlYmItNzdmZS04MzkwLTVlMmMzZTFhN2FiMiIsIm1ldGEiOnsiaW50ZXJhY3Rpb25UeXBlIjoicmVkaXJlY3QifX0%3D%7CaHR0cHM6Ly9vdXRsb29rLmxpdmUuY29tL21haWwvP2N1bHR1cmU9ZW4tdXMmY291bnRyeT11Uw&claims=%7B%22access_token%22%3A%7B%22xms_cc%22%3A%7B%22values%22%3A%5B%22CP1%22%5D%7D%7D%7D&x-client-SKU=msal.js.browser&x-client-VER=4.28.2&response_type=code&code_challenge=Y-gIvtWec47bQ-tJO49QiNIoRYFseu5HdBprFFN3Af0&code_challenge_method=S256&cobrandid=ab0455a0-8d03-46b9-b18b-df2f57b9e44c&fl=dob,flname,wld&sso_reload=true"
 
-bot_semaphore = asyncio.Semaphore(3)
+db_write_lock = threading.Lock()
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
+bot_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 active_checks = 0
 active_checks_lock = threading.Lock()
 
 # --- ACCESS CONTROL SYSTEM ---
-OWNER_IDS = [1503647930098122783, 1399261885194309654]
+OWNER_IDS = [1503647930098122783, 1399261885194309654, 1251196053349208077]
 ALLOWED_USERS_FILE = "allowed_users.json"
 
 def load_allowed_users():
@@ -203,51 +209,72 @@ def fetch_otp_from_outlook(email, password):
         driver.get(URL)
         print("Navigated to Outlook login page.")
         
-        email_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='i0116'] | //input[@name='loginfmt'] | //input[@type='email']")))
+        print(f"Typing email: {email}")
+        email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
         email_input.clear()
         email_input.send_keys(email)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
+        print("Email entered successfully.")
         
-        password_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='passwordEntry'] | //input[@id='i0118'] | //input[@name='passwd'] | //input[@type='password']")))
+        time.sleep(1)
+        next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
+        next_btn.click()
+        print("Clicked 'Next' button.")
+
+        print("Waiting for password field...")
+        password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
         password_input.clear()
         password_input.send_keys(password)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='primaryButton'] | //input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
+        print("Password entered successfully.")
         
+        time.sleep(1)
+        submit_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']")))
+        submit_btn.click()
+        print("Clicked 'Next' (Submit) button.")
+        
+        print("Checking for 'Skip for now' / security setup prompts...")
         time.sleep(2)
         for i in range(7):
             try:
                 cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel'] | //input[@value='Cancel'] | //*[contains(text(), 'Cancel')]")
                 passkey_header = driver.find_elements(By.XPATH, "//*[contains(text(), 'Setting up your passkey') or contains(text(), 'passkey')]")
+                
                 if cancel_btns and (cancel_btns[0].is_displayed() or (passkey_header and len(passkey_header) > 0)):
                     cancel_btns[0].click()
-                    time.sleep(3)
+                    print(f"Clicked Microsoft Passkey setup 'Cancel' button (Attempt {i+1})!")
+                    time.sleep(4)
                     continue
                 
                 skip_btns = driver.find_elements(By.ID, "iShowSkip")
                 if skip_btns and skip_btns[0].is_displayed():
                     skip_btns[0].click()
+                    print(f"Clicked 'Skip for now' (Attempt {i+1}).")
                     time.sleep(3)
                 else:
                     skip_btns_xpath = driver.find_elements(By.XPATH, "//*[contains(@id, 'iShowSkip') or contains(text(), 'Skip for now')]")
                     if skip_btns_xpath and skip_btns_xpath[0].is_displayed():
                         skip_btns_xpath[0].click()
+                        print(f"Clicked 'Skip for now' via XPath (Attempt {i+1}).")
                         time.sleep(3)
                     else:
                         break
-            except:
+            except Exception as e_skip:
+                print(f"Skip/Cancel loop iteration {i+1} handled exception: {e_skip}")
                 break
-                
-        # Try to bypass "Stay signed in?" screen or other intermediate pages
+        
+        print("Waiting for 'Stay signed in' prompt...")
         try:
-            stay_signed_no = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[@id='idBtn_Back'] | //button[@data-testid='secondaryButton'] | //button[contains(text(), 'No')] | //input[@value='No']"))
-            )
-            stay_signed_no.click()
-            print("Successfully bypassed 'Stay signed in?' screen.")
+            no_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']")))
+            no_btn.click()
+            print("Clicked 'No' button on 'Stay signed in' prompt.")
         except Exception:
-            pass
+            try:
+                no_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'No') or contains(text(), 'no')]")))
+                no_btn.click()
+                print("Clicked 'No' button on 'Stay signed in' prompt via text match.")
+            except Exception as stay_signed_err:
+                print("Stay signed in prompt did not appear or failed:", stay_signed_err)
             
         print("Outlook logged in. Searching for ChatGPT verification code using py3.py logic...")
         time.sleep(3)
@@ -372,51 +399,72 @@ def check_chatgpt_plus_in_outlook(email, password):
     try:
         driver.get(URL)
         
-        email_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='i0116'] | //input[@name='loginfmt'] | //input[@type='email']")))
+        print(f"Typing email: {email}")
+        email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
         email_input.clear()
         email_input.send_keys(email)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
+        print("Email entered successfully.")
         
-        password_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='passwordEntry'] | //input[@id='i0118'] | //input[@name='passwd'] | //input[@type='password']")))
+        time.sleep(1)
+        next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
+        next_btn.click()
+        print("Clicked 'Next' button.")
+
+        print("Waiting for password field...")
+        password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
         password_input.clear()
         password_input.send_keys(password)
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
-        wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@data-testid='primaryButton'] | //input[@id='idSIButton9'] | //input[@type='submit'] | //button[@type='submit']"))).click()
+        print("Password entered successfully.")
         
+        time.sleep(1)
+        submit_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']")))
+        submit_btn.click()
+        print("Clicked 'Next' (Submit) button.")
+        
+        print("Checking for 'Skip for now' / security setup prompts...")
         time.sleep(2)
         for i in range(7):
             try:
                 cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel'] | //input[@value='Cancel'] | //*[contains(text(), 'Cancel')]")
                 passkey_header = driver.find_elements(By.XPATH, "//*[contains(text(), 'Setting up your passkey') or contains(text(), 'passkey')]")
+                
                 if cancel_btns and (cancel_btns[0].is_displayed() or (passkey_header and len(passkey_header) > 0)):
                     cancel_btns[0].click()
-                    time.sleep(3)
+                    print(f"Clicked Microsoft Passkey setup 'Cancel' button (Attempt {i+1})!")
+                    time.sleep(4)
                     continue
                 
                 skip_btns = driver.find_elements(By.ID, "iShowSkip")
                 if skip_btns and skip_btns[0].is_displayed():
                     skip_btns[0].click()
+                    print(f"Clicked 'Skip for now' (Attempt {i+1}).")
                     time.sleep(3)
                 else:
                     skip_btns_xpath = driver.find_elements(By.XPATH, "//*[contains(@id, 'iShowSkip') or contains(text(), 'Skip for now')]")
                     if skip_btns_xpath and skip_btns_xpath[0].is_displayed():
                         skip_btns_xpath[0].click()
+                        print(f"Clicked 'Skip for now' via XPath (Attempt {i+1}).")
                         time.sleep(3)
                     else:
                         break
-            except:
+            except Exception as e_skip:
+                print(f"Skip/Cancel loop iteration {i+1} handled exception: {e_skip}")
                 break
-                
-        # Try to bypass "Stay signed in?" screen or other intermediate pages
+        
+        print("Waiting for 'Stay signed in' prompt...")
         try:
-            stay_signed_no = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//input[@id='idBtn_Back'] | //button[@data-testid='secondaryButton'] | //button[contains(text(), 'No')] | //input[@value='No']"))
-            )
-            stay_signed_no.click()
-            print("Successfully bypassed 'Stay signed in?' screen.")
+            no_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']")))
+            no_btn.click()
+            print("Clicked 'No' button on 'Stay signed in' prompt.")
         except Exception:
-            pass
+            try:
+                no_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'No') or contains(text(), 'no')]")))
+                no_btn.click()
+                print("Clicked 'No' button on 'Stay signed in' prompt via text match.")
+            except Exception as stay_signed_err:
+                print("Stay signed in prompt did not appear or failed:", stay_signed_err)
             
         print("Outlook logged in. Searching for subscription / invoice keywords...")
         time.sleep(3)
@@ -465,6 +513,38 @@ def check_chatgpt_plus_in_outlook(email, password):
 
 
 
+# --- DATABASE CONFIG ---
+DB_FILE = "buydb.json"
+DONE_LOG_CHANNEL = 1507918067772948500
+
+def load_db():
+    with db_write_lock:
+        if not os.path.exists(DB_FILE):
+            default = {
+                "balances": {},
+                "assigned": {},
+                "done_logs": {}
+            }
+            with open(DB_FILE, "w") as f:
+                json.dump(default, f, indent=4)
+            return default
+
+        try:
+            with open(DB_FILE, "r") as f:
+                db = json.load(f)
+        except:
+            db = {}
+
+        db.setdefault("balances", {})
+        db.setdefault("assigned", {})
+        db.setdefault("done_logs", {})
+        return db
+
+def save_db(data):
+    with db_write_lock:
+        with open(DB_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+
 # --- DISCORD BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True
@@ -472,13 +552,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f"🤖 Bot is logged in and ready as: {bot.user}")
-
-def parse_credentials(ctx, user_input):
-    if ":" not in user_input:
-        return None, None
-    email, password = user_input.split(":", 1)
-    return email.strip(), password.strip()
+    print(f"[System] Bot is logged in and ready as: {bot.user}")
 
 def parse_multiple_credentials(user_input):
     parts = user_input.strip().split()
@@ -496,7 +570,7 @@ def extract_userid(user_input):
 # --- PERMISSION PROTECTION WRAPPER ---
 def check_authorization(ctx):
     if not is_authorized(ctx.author.id):
-        raise commands.CheckFailure("❌ **Access Denied!** You do not have permission to run bot commands.")
+        raise commands.CheckFailure("[Error] Access Denied! You do not have permission to run bot commands.")
     return True
 
 @bot.event
@@ -507,105 +581,102 @@ async def on_command_error(ctx, error):
         print(f"Error executing command: {error}")
 
 # --- USER MANAGEMENT COMMANDS (OWNER ONLY) ---
-
 @bot.command(name="adduser")
 async def adduser_command(ctx, *, user_input: str = ""):
     """Add a Discord User ID to the allowed users list (Owner Only)"""
     if ctx.author.id not in OWNER_IDS:
-        await ctx.send("❌ **Access Denied!** Only the bot Owner can run this command.")
+        await ctx.send("[Error] Access Denied! Only a bot Owner can run this command.")
         return
-        
+
     target_id = extract_userid(user_input)
     if not target_id:
-        await ctx.send("⚠️ **Invalid format!** Please use: `!adduser @user` or `!adduser <discorduserid>`")
+        await ctx.send("[Warning] Invalid format! Please use: !adduser @user or !adduser <discorduserid>")
         return
-        
+
     allowed_list = load_allowed_users()
     if target_id in allowed_list:
-        await ctx.send(f"ℹ️ User <@{target_id}> is already in the allowed list.")
+        await ctx.send(f"[Info] User <@{target_id}> is already in the allowed list.")
         return
-        
+
     allowed_list.append(target_id)
     save_allowed_users(allowed_list)
-    await ctx.send(f"✅ **[Access Granted]** User <@{target_id}> (ID: `{target_id}`) has been successfully authorized to run bot commands!")
+    await ctx.send(f"[Success] [Access Granted] User <@{target_id}> (ID: {target_id}) has been successfully authorized to run bot commands!")
 
 @bot.command(name="removeuser")
 async def removeuser_command(ctx, *, user_input: str = ""):
     """Remove a Discord User ID from the allowed users list (Owner Only)"""
     if ctx.author.id not in OWNER_IDS:
-        await ctx.send("❌ **Access Denied!** Only the bot Owner can run this command.")
+        await ctx.send("[Error] Access Denied! Only a bot Owner can run this command.")
         return
-        
+
     target_id = extract_userid(user_input)
     if not target_id:
-        await ctx.send("⚠️ **Invalid format!** Please use: `!removeuser @user` or `!removeuser <discorduserid>`")
+        await ctx.send("[Warning] Invalid format! Please use: !removeuser @user or !removeuser <discorduserid>")
         return
-        
+
     allowed_list = load_allowed_users()
     if target_id not in allowed_list:
-        await ctx.send(f"⚠️ User <@{target_id}> is not in the allowed list.")
+        await ctx.send(f"[Warning] User <@{target_id}> is not in the allowed list.")
         return
-        
+
     allowed_list.remove(target_id)
     save_allowed_users(allowed_list)
-    await ctx.send(f"❌ **[Access Revoked]** User <@{target_id}> (ID: `{target_id}`) has been removed from authorized access.")
+    await ctx.send(f"[Success] [Access Revoked] User <@{target_id}> (ID: {target_id}) has been removed from authorized access.")
 
 @bot.command(name="listusers")
 async def listusers_command(ctx):
     """List all authorized Discord User IDs (Owner Only)"""
     if ctx.author.id not in OWNER_IDS:
-        await ctx.send("❌ **Access Denied!** Only the bot Owner can run this command.")
+        await ctx.send("[Error] Access Denied! Only a bot Owner can run this command.")
         return
-        
+
     allowed_list = load_allowed_users()
     report = []
-    report.append("📋 **Authorized Discord Users List:**")
+    report.append("[Report] Authorized Discord Users List:")
     report.append("="*40)
-    
-    owners_list = [f"<@{o_id}> (ID: `{o_id}`)" for o_id in OWNER_IDS]
-    report.append(f"👑 **Owners:** {', '.join(owners_list)}")
-    
+    report.append(f"Owner list: {', '.join([f'<@{o_id}>' for o_id in OWNER_IDS])}")
+
     if allowed_list:
-        report.append(f"👤 **Allowed Users [{len(allowed_list)}]:**")
+        report.append(f"Allowed Users [{len(allowed_list)}]:")
         for u_id in allowed_list:
-            report.append(f"• <@{u_id}> (ID: `{u_id}`)")
+            report.append(f"• <@{u_id}> (ID: {u_id})")
     else:
-        report.append("👤 *No extra users have been added yet.*")
-        
+        report.append("Allowed Users: No extra users have been added yet.")
+
     report.append("="*40)
     await ctx.send("\n".join(report))
 
-
 # --- PRIMARY WORKER BOT COMMANDS (PROTECTED) ---
-
-@bot.command(name="otp")
+@bot.command()
 @commands.check(check_authorization)
-async def otp_command(ctx, *, credentials: str = ""):
-    """Log in to Outlook and automatically fetch the latest 6-digit ChatGPT OTP / verification code"""
-    email, password = parse_credentials(ctx, credentials)
-    if not email or not password:
-        await ctx.send("⚠️ **Invalid format!** Please use: `!otp email:password`")
-        return
-        
-    await ctx.send(f"⏳ **[Outlook OTP]** Logging into `{email}` to retrieve your 6-digit verification code...")
-    
+async def done(ctx, *, data):
+    db = load_db()
+    uid = str(ctx.author.id)
+
+    if ":" not in data:
+        return await ctx.send("[Error] Invalid format\nUse: !done mail:pass")
+
+    if uid not in db["assigned"]:
+        db["assigned"][uid] = []
+
+    assigned_lower = [x.lower().strip() for x in db["assigned"].get(uid, [])]
+    if data.lower().strip() not in assigned_lower:
+        return await ctx.send("[Error] This mail wasn't assigned to you")
+
+    await ctx.send("[Status] Checking ChatGPT Plus...")
+    email, password = data.split(":", 1)
+
     async with bot_semaphore:
-        # Increment active checking counter
         with active_checks_lock:
             global active_checks
             active_checks += 1
 
         local_driver = None
         try:
-            otp_code, local_driver = await asyncio.to_thread(fetch_otp_from_outlook, email, password)
-            if otp_code:
-                await ctx.send(f"🎉 **[OTP Retrieval Successful]**")
-                await ctx.send(f"🔑 **Verification Code (Tap to copy):**")
-                await ctx.send(f"`{otp_code}`")
-            else:
-                await ctx.send(f"❌ **[OTP Retrieval Failed]** Could not find a ChatGPT verification code in the last 2 minutes. Please trigger 'Send code' in your browser and try again.")
-        except Exception as err:
-            await ctx.send(f"⚠️ **[OTP Error]** An unexpected exception occurred: `{err}`")
+            status, local_driver = await asyncio.to_thread(check_chatgpt_plus_in_outlook, email, password)
+        except Exception as e:
+            print(f"Checker Error: {e}")
+            return await ctx.send("[Error] Checker failed")
         finally:
             if local_driver:
                 try:
@@ -613,17 +684,50 @@ async def otp_command(ctx, *, credentials: str = ""):
                 except:
                     pass
 
-            # Decrement active checking counter and read idle state
             with active_checks_lock:
                 active_checks -= 1
                 is_idle = (active_checks == 0)
 
-            # Perform basic heap garbage collection
             gc.collect()
-
-            # Run aggressive process sweeping only when all checking threads are idle
             if is_idle:
                 cleanup_chrome_processes()
+
+    if status != "Subscribed":
+        return await ctx.send(f"[Failure] ChatGPT Plus not found\nStatus: {status}")
+
+    with db_write_lock:
+        db = load_db()
+        if uid not in db["balances"]:
+            db["balances"][uid] = 0
+
+        db["balances"][uid] += 30
+        bal = db["balances"][uid]
+
+        for combo in db["assigned"].get(uid, []):
+            if combo.lower().strip() == data.lower().strip():
+                db["assigned"][uid].remove(combo)
+                break
+
+        username = str(ctx.author)
+        if username not in db["done_logs"]:
+            db["done_logs"][username] = []
+        db["done_logs"][username].append(data)
+        save_db(db)
+
+    channel = bot.get_channel(DONE_LOG_CHANNEL)
+    if channel:
+        try:
+            embed = discord.Embed(title="[Success] Done Submitted", color=0x00ff99)
+            embed.add_field(name="User", value=ctx.author.mention, inline=False)
+            embed.add_field(name="Mail", value=data, inline=False)
+            embed.add_field(name="Checker Status", value=status, inline=False)
+            embed.add_field(name="Balance", value=f"{bal} coins", inline=False)
+            await channel.send(embed=embed)
+            await channel.send(f"```{data}```")
+        except Exception as log_err:
+            print(f"Failed logging to channel: {log_err}")
+
+    await ctx.send(f"[Success] ChatGPT Plus Found\nAdded 30 coins\nBalance: {bal}")
 
 @bot.command(name="check")
 @commands.check(check_authorization)
@@ -631,21 +735,20 @@ async def check_command(ctx, *, credentials: str = ""):
     """Log in to Outlook and check one or multiple accounts for ChatGPT Plus subscription history"""
     accounts = parse_multiple_credentials(credentials)
     if not accounts:
-        await ctx.send("⚠️ **Invalid format!** Please use: `!check email:password` (or list multiple separated by spaces/newlines).")
+        await ctx.send("[Warning] Invalid format! Please use: !check email:password (or list multiple separated by spaces/newlines).")
         return
-        
+
     total = len(accounts)
-    status_msg = await ctx.send(f"⏳ **[Outlook Check]** Starting subscription check for **{total}** account(s)...")
-    
+    status_msg = await ctx.send(f"[Status] Starting subscription check for {total} account(s)...")
+
     subscribed_list = []
     not_subscribed_list = []
     failed_list = []
-    
+
     for index, (email, password) in enumerate(accounts, 1):
-        await status_msg.edit(content=f"⏳ **[Outlook Check]** Processing account **{index}/{total}**: `{email}`...")
-        
+        await status_msg.edit(content=f"[Status] Processing account {index}/{total}: {email}...")
+
         async with bot_semaphore:
-            # Increment active checking counter
             with active_checks_lock:
                 global active_checks
                 active_checks += 1
@@ -670,63 +773,160 @@ async def check_command(ctx, *, credentials: str = ""):
                         local_driver.quit()
                     except:
                         pass
-                
-                # Decrement active checking counter and read idle state
+
                 with active_checks_lock:
                     active_checks -= 1
                     is_idle = (active_checks == 0)
 
-                # Perform basic heap garbage collection
                 gc.collect()
-
-                # Run aggressive process sweeping only when all checking threads are idle
                 if is_idle:
                     cleanup_chrome_processes()
-                        
+
     report = []
-    report.append("📋 **ChatGPT Plus Verification Summary Report:**")
+    report.append("[Report] ChatGPT Plus Verification Summary:")
     report.append("="*45)
-    
+
     if subscribed_list:
-        report.append(f"🎉 **Subscribed (Plus active) [{len(subscribed_list)}]:**")
+        report.append(f"[Success] Subscribed (Plus active) [{len(subscribed_list)}]:")
         for email in subscribed_list:
-            report.append(f"• `{email}`")
-            
+            report.append(f"• {email}")
+
     if not_subscribed_list:
         if len(report) > 2:
             report.append("")
-        report.append(f"❌ **Not Subscribed [{len(not_subscribed_list)}]:**")
+        report.append(f"[Not Subscribed] [{len(not_subscribed_list)}]:")
         for email in not_subscribed_list:
-            report.append(f"• `{email}`")
-            
+            report.append(f"• {email}")
+
     if failed_list:
         if len(report) > 2:
             report.append("")
-        report.append(f"⚠️ **Check Failed / Errors [{len(failed_list)}]:**")
+        report.append(f"[Error / Failed] [{len(failed_list)}]:")
         for email, reason in failed_list:
-            report.append(f"• `{email}` (Reason: *{reason}*)")
-            
+            report.append(f"• {email} (Reason: {reason})")
+
     report.append("="*45)
-    report.append("✓ *All checks complete.*")
-    
+    report.append("All checks complete.")
+
     final_report_text = "\n".join(report)
     if len(final_report_text) > 2000:
         import io
         file_data = io.BytesIO(final_report_text.encode('utf-8'))
-        await ctx.send("📋 **Summary Report (Attached due to length limit):**", file=discord.File(file_data, "check_report.txt"))
+        await ctx.send("[Report] Summary Report (Attached due to length limit):", file=discord.File(file_data, "check_report.txt"))
     else:
         await ctx.send(final_report_text)
-        
+
     try:
         await status_msg.delete()
     except:
         pass
 
+@bot.command(name="otp")
+@commands.check(check_authorization)
+async def otp_command(ctx, *, credentials: str = ""):
+    """Log in to Outlook and retrieve the 6-digit ChatGPT verification code"""
+    if not credentials:
+        await ctx.send("[Warning] Invalid format! Please use: !otp email:password")
+        return
 
-        
+    if ":" not in credentials:
+        await ctx.send("[Warning] Invalid format! Please use: !otp email:password")
+        return
+
+    email, password = credentials.split(":", 1)
+    email = email.strip()
+    password = password.strip()
+
+    status_msg = await ctx.send(f"[Status] Logging into {email} to retrieve verification code...")
+
+    async with bot_semaphore:
+        with active_checks_lock:
+            global active_checks
+            active_checks += 1
+
+        local_driver = None
+        try:
+            otp_code, local_driver = await asyncio.to_thread(fetch_otp_from_outlook, email, password)
+        except Exception as e:
+            print(f"OTP Checker Error: {e}")
+            await status_msg.edit(content="[Error] OTP checker execution failed.")
+            return
+        finally:
+            if local_driver:
+                try:
+                    local_driver.quit()
+                except:
+                    pass
+
+            with active_checks_lock:
+                active_checks -= 1
+                is_idle = (active_checks == 0)
+
+            gc.collect()
+            if is_idle:
+                cleanup_chrome_processes()
+
+    if otp_code:
+        await status_msg.edit(content=f"[Success] OTP Retrieval Successful!\nVerification Code: {otp_code}")
+    else:
+        await status_msg.edit(content=f"[Failure] Could not find a ChatGPT verification code in the last 2 minutes. Please trigger 'Send code' in your browser and try again.")
+
+# --- CLOUD SERVER & STAY AWAKE SLEEP PREVENTION ---
+class RailwayHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health" or self.path == "/":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "healthy"}).encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run_http_server(port):
+    handler = RailwayHandler
+    socketserver.TCPServer.allow_reuse_address = True
+    try:
+        with socketserver.TCPServer(("", port), handler) as httpd:
+            print(f"[System] Railway HTTP Server is running on port {port}...")
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"Failed to start HTTP server: {e}")
+
+def keep_awake():
+    time.sleep(30)
+    app_url = os.getenv("RAILWAY_STATIC_URL") or os.getenv("APP_URL")
+    if not app_url:
+        print("[Self-Pinger] RAILWAY_STATIC_URL or APP_URL not set. Skipping self-pinging.")
+        return
+
+    if not app_url.startswith("http"):
+        app_url = f"https://{app_url}"
+
+    print(f"[Self-Pinger] Started! Pinging {app_url} every 10 minutes to stay awake.")
+    ssl_context = ssl._create_unverified_context()
+
+    while True:
+        try:
+            req = urllib.request.Request(
+                app_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as r:
+                r.read()
+            print("[Self-Pinger] Ping successful! Keeping app awake.")
+        except Exception as e:
+            print(f"[Self-Pinger] Ping failed: {e}")
+        time.sleep(600)
 
 # --- START BOT ---
 if __name__ == "__main__":
+    port_env = os.getenv("PORT")
+    if port_env:
+        port = int(port_env)
+        threading.Thread(target=run_http_server, args=(port,), daemon=True).start()
+        threading.Thread(target=keep_awake, daemon=True).start()
+
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         print("ERROR: DISCORD_TOKEN is missing! Please set it in your .env file.")

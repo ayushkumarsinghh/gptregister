@@ -1,7 +1,8 @@
 FROM python:3.10-slim
 
-# Install system core utilities and download/install Google Chrome stable
+# Install system core utilities, Xvfb for headful browser support, and Google Chrome stable
 RUN apt-get update && apt-get install -y \
+    xvfb \
     wget \
     gnupg \
     curl \
@@ -25,5 +26,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy bot code
 COPY . .
 
-# Run the bot
-CMD ["python", "python.py"]
+# Run the bot inside virtual frame buffer display to support headful Turnstile bypasses on cloud servers
+CMD ["xvfb-run", "--server-args=-screen 0 1920x1080x24", "python", "py3.py"]

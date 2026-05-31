@@ -19,6 +19,8 @@ import socketserver
 import ssl
 import urllib.request
 import gc
+import py3
+
 # Load standard .env file manually if it exists
 if os.path.exists(".env"):
     with open(".env", "r") as f:
@@ -66,27 +68,88 @@ def is_authorized(user_id):
     allowed = load_allowed_users()
     return user_id in allowed
 
-# --- HEADLESS CHROMEDRIVER OPTIONS FACTORY ---
+def setup_proxy_extension(proxy_string):
+    cleaned = proxy_string.replace("http://", "").replace("https://", "")
+    auth_part, ip_port = cleaned.split("@", 1)
+    username, password = auth_part.split(":", 1)
+    ip, port = ip_port.split(":", 1)
+    
+    plugin_dir = os.path.join(os.getcwd(), "proxy_auth_plugin")
+    if not os.path.exists(plugin_dir):
+        os.makedirs(plugin_dir)
+        
+    manifest_json = """{
+    "version": "1.0.0",
+    "manifest_version": 2,
+    "name": "Chrome Proxy",
+    "permissions": [
+        "proxy",
+        "tabs",
+        "unlimitedStorage",
+        "storage",
+        "<all_urls>",
+        "webRequest",
+        "webRequestBlocking"
+    ],
+    "background": {
+        "scripts": ["background.js"]
+    },
+    "minimum_chrome_version":"22.0.0"
+}"""
+    
+    background_js = f"""var config = {{
+    mode: "fixed_servers",
+    rules: {{
+      singleProxy: {{
+        scheme: "http",
+        host: "{ip}",
+        port: parseInt({port})
+      }}
+    }}
+  }};
+
+chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+
+chrome.webRequest.onAuthRequired.addListener(
+    function callbackFn(details) {{
+        return {{
+            authCredentials: {{
+                username: "{username}",
+                password: "{password}"
+            }}
+        }};
+    }},
+    {{urls: ["<all_urls>"]}},
+    ['blocking']
+);"""
+
+    with open(os.path.join(plugin_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        f.write(manifest_json)
+    with open(os.path.join(plugin_dir, "background.js"), "w", encoding="utf-8") as f:
+        f.write(background_js)
+        
+    return plugin_dir
+
 def get_chrome_options():
     options = uc.ChromeOptions()
     options.add_argument("--start-maximized")
-    is_cloud = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
-    if is_cloud:
-        # options.add_argument("--headless=new")  # Handled in uc.Chrome constructor
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--disable-default-apps")
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-service-autorun")
-        options.add_argument("--password-store=basic")
-        options.add_argument("--use-gl=swiftshader")
-        options.add_argument("--blink-settings=imagesEnabled=false")
-        options.add_argument("--js-flags=--max-old-space-size=256")
-        options.add_argument("--no-zygote")
-        options.add_argument("--disable-renderer-backgrounding")
+    
+    PROXIES = [
+        "http://ffbutrps:h9l80ao50ael@38.154.203.95:5863",
+        "http://ffbutrps:h9l80ao50ael@198.105.121.200:6462",
+        "http://ffbutrps:h9l80ao50ael@64.137.96.74:6641",
+        "http://ffbutrps:h9l80ao50ael@209.127.138.10:5784",
+        "http://ffbutrps:h9l80ao50ael@38.154.185.97:6370",
+        "http://ffbutrps:h9l80ao50ael@84.247.60.125:6095",
+        "http://ffbutrps:h9l80ao50ael@142.111.67.146:5611",
+        "http://ffbutrps:h9l80ao50ael@191.96.254.138:6185",
+        "http://ffbutrps:h9l80ao50ael@31.58.9.4:6077",
+        "http://ffbutrps:h9l80ao50ael@64.137.10.153:5803"
+    ]
+    proxy = random.choice(PROXIES)
+    print(f"Using proxy: {proxy.split('@')[-1]}")
+    plugin_path = setup_proxy_extension(proxy)
+    options.add_argument(f'--load-extension={plugin_path}')
     return options
 
 import gc
@@ -107,12 +170,11 @@ def cleanup_chrome_processes():
             print(f"Error cleaning dangling Chrome processes: {pe}")
 
 def create_driver(options=None):
-    is_cloud = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
     # Try auto-detect first
     try:
         print("Initializing Chrome driver (auto-detect)...")
         fresh_options = get_chrome_options()
-        return uc.Chrome(options=fresh_options, headless=is_cloud, use_subprocess=True)
+        return uc.Chrome(options=fresh_options, headless=False, use_subprocess=True)
     except Exception as e:
         err_msg = str(e)
         print(f"Auto-detect failed: {err_msg}")
@@ -150,7 +212,7 @@ def create_driver(options=None):
             print(f"Self-Healing: Detected Chrome version {detected_ver}. Initializing driver...")
             try:
                 retry_options = get_chrome_options()
-                return uc.Chrome(options=retry_options, version_main=detected_ver, headless=is_cloud, use_subprocess=True)
+                return uc.Chrome(options=retry_options, version_main=detected_ver, headless=False, use_subprocess=True)
             except Exception as retry_err:
                 print(f"Self-Healing retry failed for version {detected_ver}: {retry_err}")
 
@@ -179,7 +241,7 @@ def create_driver(options=None):
                 try:
                     print(f"Initializing Chrome driver with version_main={major_version}...")
                     reg_options = get_chrome_options()
-                    return uc.Chrome(options=reg_options, version_main=major_version, headless=is_cloud, use_subprocess=True)
+                    return uc.Chrome(options=reg_options, version_main=major_version, headless=False, use_subprocess=True)
                 except Exception as reg_err:
                     print(f"Failed with version_main={major_version}: {reg_err}")
 
@@ -188,14 +250,14 @@ def create_driver(options=None):
             try:
                 print(f"Initializing Chrome driver with fallback version_main={ver}...")
                 fallback_options = get_chrome_options()
-                return uc.Chrome(options=fallback_options, version_main=ver, headless=is_cloud, use_subprocess=True)
+                return uc.Chrome(options=fallback_options, version_main=ver, headless=False, use_subprocess=True)
             except Exception:
                 pass
 
         # If all else fails, try one last time with auto-detect to let the error propagate
         print("All Chrome driver initialization attempts failed. Trying final fallback...")
         final_options = get_chrome_options()
-        return uc.Chrome(options=final_options, headless=is_cloud, use_subprocess=True)
+        return uc.Chrome(options=final_options, headless=False, use_subprocess=True)
 
 # --- SELENIUM WORKERS ---
 
@@ -870,6 +932,58 @@ async def otp_command(ctx, *, credentials: str = ""):
         await status_msg.edit(content=f"[Success] OTP Retrieval Successful!\nVerification Code: {otp_code}")
     else:
         await status_msg.edit(content=f"[Failure] Could not find a ChatGPT verification code in the last 2 minutes. Please trigger 'Send code' in your browser and try again.")
+
+async def run_onboarding_background(ctx, email, password):
+    async with bot_semaphore:
+        with active_checks_lock:
+            global active_checks
+            active_checks += 1
+
+        local_driver = None
+        try:
+            success, local_driver = await asyncio.to_thread(py3.run_flow, email, password)
+            if success and local_driver:
+                await asyncio.to_thread(py3.fill_profile_form, local_driver)
+                print(f"[System] Onboarding complete for {email}.")
+            else:
+                print(f"[System] Onboarding failed for {email}.")
+        except Exception as e:
+            print(f"[Error] Onboarding background task error: {e}")
+            traceback.print_exc()
+        finally:
+            if local_driver:
+                try:
+                    local_driver.quit()
+                except:
+                    pass
+
+            with active_checks_lock:
+                active_checks -= 1
+                is_idle = (active_checks == 0)
+
+            gc.collect()
+            if is_idle:
+                cleanup_chrome_processes()
+
+@bot.command(name="qr")
+@commands.check(check_authorization)
+async def qr_command(ctx, *, credentials: str = ""):
+    """Automate ChatGPT onboarding and submit session details for a QR code"""
+    if not credentials:
+        await ctx.send("[Warning] Invalid format! Please use: !qr email:password")
+        return
+
+    if ":" not in credentials:
+        await ctx.send("[Warning] Invalid format! Please use: !qr email:password")
+        return
+
+    email, password = credentials.split(":", 1)
+    email = email.strip()
+    password = password.strip()
+
+    asyncio.create_task(run_onboarding_background(ctx, email, password))
+
+    await ctx.send("[Success] Session submission initiated. The generated QR code will soon arrive in your DMs.")
 
 # --- CLOUD SERVER & STAY AWAKE SLEEP PREVENTION ---
 class RailwayHandler(http.server.BaseHTTPRequestHandler):

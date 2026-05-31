@@ -22,4 +22,6 @@ ghostdriver.log
 py1.py
 spotify_links.txt
 chatgpt_session.txt
+proxy_auth_plugin/
+allowed_users.json
 

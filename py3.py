@@ -118,12 +118,21 @@ def get_chrome_options():
     # Configure required container sandbox arguments in cloud/Docker environments
     is_container = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
     if is_container:
-        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-software-rasterizer")
         options.add_argument("--window-size=1920,1080")
+        
+        # Optimize memory usage to prevent OOM kills on Railway (512MB RAM limit)
+        options.add_argument("--js-flags=--max-old-space-size=256")
+        options.add_argument("--disable-features=Translate,SafeBrowsing,CalculatePageVisibilityAPI")
+        options.add_argument("--disable-background-networking")
+        options.add_argument("--disable-default-apps")
+        options.add_argument("--disable-sync")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--prerender-from-omnibox=disabled")
         
     return options
 
@@ -327,7 +336,7 @@ def create_driver(options=None):
     try:
         print(f"Initializing Chrome driver (auto-detect) | Headless: {is_headless}...")
         fresh_options = get_chrome_options()
-        return uc.Chrome(options=fresh_options, headless=is_headless, use_subprocess=True)
+        return uc.Chrome(options=fresh_options, headless=False, use_subprocess=True)
     except Exception as e:
         err_msg = str(e)
         print(f"Auto-detect failed: {err_msg}")
@@ -362,7 +371,7 @@ def create_driver(options=None):
             print(f"Self-Healing: Detected Chrome version {detected_ver}. Initializing driver...")
             try:
                 retry_options = get_chrome_options()
-                return uc.Chrome(options=retry_options, version_main=detected_ver, headless=is_headless, use_subprocess=True)
+                return uc.Chrome(options=retry_options, version_main=detected_ver, headless=False, use_subprocess=True)
             except Exception as retry_err:
                 print(f"Self-Healing retry failed for version {detected_ver}: {retry_err}")
 
@@ -390,7 +399,7 @@ def create_driver(options=None):
                 try:
                     print(f"Initializing Chrome driver with version_main={major_version}...")
                     reg_options = get_chrome_options()
-                    return uc.Chrome(options=reg_options, version_main=major_version, headless=is_headless, use_subprocess=True)
+                    return uc.Chrome(options=reg_options, version_main=major_version, headless=False, use_subprocess=True)
                 except Exception as reg_err:
                     print(f"Failed with version_main={major_version}: {reg_err}")
 
@@ -398,13 +407,13 @@ def create_driver(options=None):
             try:
                 print(f"Initializing Chrome driver with fallback version_main={ver}...")
                 fallback_options = get_chrome_options()
-                return uc.Chrome(options=fallback_options, version_main=ver, headless=is_headless, use_subprocess=True)
+                return uc.Chrome(options=fallback_options, version_main=ver, headless=False, use_subprocess=True)
             except Exception:
                 pass
 
         print("All Chrome driver initialization attempts failed. Trying final fallback...")
         final_options = get_chrome_options()
-        return uc.Chrome(options=final_options, headless=is_headless, use_subprocess=True)
+        return uc.Chrome(options=final_options, headless=False, use_subprocess=True)
 
 def fill_profile_form(driver):
     print("Waiting for profile registration form to load...")
@@ -783,34 +792,28 @@ async def run_onboarding_background(ctx, bot, email):
                         await ctx.send(f"Sorry, onboarding failed for {email} (could not retrieve session). Please try again.")
             else:
                 screenshot_sent = False
-                if local_driver:
+                if os.path.exists("flow_error_debug.png"):
                     try:
-                        screenshot_path = "error_screenshot.png"
-                        local_driver.save_screenshot(screenshot_path)
-                        if os.path.exists(screenshot_path):
-                            file = discord.File(screenshot_path)
-                            await ctx.send(content=f"Sorry, onboarding failed for {email} (could not complete login flow). Here is what the browser saw:", file=file)
-                            screenshot_sent = True
-                            os.remove(screenshot_path)
+                        file = discord.File("flow_error_debug.png")
+                        await ctx.send(content=f"Sorry, onboarding failed for {email} (could not complete login flow). Here is what the browser saw:", file=file)
+                        screenshot_sent = True
+                        os.remove("flow_error_debug.png")
                     except Exception as ss_err:
-                        print(f"Failed to capture debug screenshot: {ss_err}")
+                        print(f"Failed to send local debug screenshot: {ss_err}")
                 if not screenshot_sent:
                     await ctx.send(f"Sorry, onboarding failed for {email} (could not complete login flow). Please try again.")
         except Exception as e:
             print(f"[Error] Onboarding background task error: {e}")
             traceback.print_exc()
             screenshot_sent = False
-            if local_driver:
+            if os.path.exists("flow_error_debug.png"):
                 try:
-                    screenshot_path = "error_screenshot.png"
-                    local_driver.save_screenshot(screenshot_path)
-                    if os.path.exists(screenshot_path):
-                        file = discord.File(screenshot_path)
-                        await ctx.send(content=f"Sorry, onboarding failed for {email} due to an error. Here is what the browser saw at the time of failure:", file=file)
-                        screenshot_sent = True
-                        os.remove(screenshot_path)
+                    file = discord.File("flow_error_debug.png")
+                    await ctx.send(content=f"Sorry, onboarding failed for {email} due to an error. Here is what the browser saw at the time of failure:", file=file)
+                    screenshot_sent = True
+                    os.remove("flow_error_debug.png")
                 except Exception as ss_err:
-                    print(f"Failed to capture debug screenshot: {ss_err}")
+                    print(f"Failed to send local debug screenshot: {ss_err}")
             if not screenshot_sent:
                 await ctx.send(f"Sorry, onboarding failed for {email} due to an error. Please try again.")
             if local_driver:

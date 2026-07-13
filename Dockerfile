@@ -28,5 +28,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy bot code
 COPY . .
 
-# Run the bot inside virtual frame buffer display to support headful Turnstile bypasses on cloud servers
-CMD ["xvfb-run", "--server-args=-screen 0 1920x1080x24", "python", "py3.py"]
+# Run the bot directly, letting it start the background display internally
+CMD ["python", "-u", "py3.py"]

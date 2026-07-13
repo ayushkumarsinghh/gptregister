@@ -1011,8 +1011,6 @@ def is_authorized(user_id):
     return user_id in allowed
 
 def check_authorization(ctx):
-    if not is_authorized(ctx.author.id):
-        raise commands.CheckFailure("[Error] Access Denied! You do not have permission to run bot commands.")
     return True
 
 # --- BACKGROUND PROCESS MANAGEMENT ---

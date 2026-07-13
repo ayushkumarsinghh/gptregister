@@ -300,6 +300,12 @@ def run_flow(email, bridge):
         except Exception as e:
             print(f"Flow attempt {retry_count+1} failed:")
             traceback.print_exc()
+            if driver:
+                try:
+                    driver.save_screenshot("flow_error_debug.png")
+                    print("[Debug] Saved error state screenshot as flow_error_debug.png")
+                except Exception as ss_err:
+                    print(f"Failed to save error screenshot: {ss_err}")
             retry_count += 1
             if driver:
                 try:

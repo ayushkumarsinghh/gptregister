@@ -19,12 +19,10 @@ import http.server
 import socketserver
 import ssl
 import urllib.request
+import queue
 
 # --- CONFIG ---
-URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=9199bf20-a13f-4107-85dc-02114787ef48&scope=https%3A%2F%2Foutlook.office.com%2F.default%20openid%20profile%20offline_access&redirect_uri=https%3A%2F%2Foutlook.live.com%2Fmail%2F&client-request-id=85af84fb-4838-c204-f618-76e540231109&response_mode=fragment&client_info=1&prompt=select_account&nonce=019e35f5-4ebc-7f28-8e36-611bb37f46ef&state=eyJpZCI6IjAxOWUzNWY1LTRlYmItNzdmZS04MzkwLTVlMmMzZTFhN2FiMiIsIm1ldGEiOnsiaW50ZXJhY3Rpb25UeXBlIjoicmVkaXJlY3QifX0%3D%7CaHR0cHM6Ly9vdXRsb29rLmxpdmUuY29tL21haWwvP2N1bHR1cmU9ZW4tdXMmY291bnRyeT11cw&claims=%7B%22access_token%22%3A%7B%22xms_cc%22%3A%7B%22values%22%3A%5B%22CP1%22%5D%7D%7D%7D&x-client-SKU=msal.js.browser&x-client-VER=4.28.2&response_type=code&code_challenge=Y-gIvtWec47bQ-tJO49QiNIoRYFseu5HdBprFFN3Af0&code_challenge_method=S256&cobrandid=ab0455a0-8d03-46b9-b18b-df2f57b9e44c&fl=dob,flname,wld&sso_reload=true"
-
 CHATGPT_SESSION_URL = "https://chatgpt.com/api/auth/session"
-SESSION_FILE_PATH = "chatgpt_session.txt"
 
 # Max concurrent Chrome instances to protect server resources
 bot_semaphore = asyncio.Semaphore(3)
@@ -37,6 +35,10 @@ if os.path.exists(".env"):
                 parts = line.strip().split("=", 1)
                 if len(parts) == 2:
                     os.environ[parts[0].strip()] = parts[1].strip()
+
+# --- PROXY CONFIGURATION ---
+# Format: "http://username:password@ip:port"
+PROXY_STRING = "http://sleepiness29:pmfMiEZSvK@82.47.202.20:50100"
 
 def setup_proxy_extension(proxy_string):
     cleaned = proxy_string.replace("http://", "").replace("https://", "")
@@ -104,38 +106,222 @@ def get_chrome_options():
     options = uc.ChromeOptions()
     options.add_argument("--start-maximized")
     
-    PROXIES = [
-        "http://ffbutrps:h9l80ao50ael@38.154.203.95:5863",
-        "http://ffbutrps:h9l80ao50ael@198.105.121.200:6462",
-        "http://ffbutrps:h9l80ao50ael@64.137.96.74:6641",
-        "http://ffbutrps:h9l80ao50ael@209.127.138.10:5784",
-        "http://ffbutrps:h9l80ao50ael@38.154.185.97:6370",
-        "http://ffbutrps:h9l80ao50ael@84.247.60.125:6095",
-        "http://ffbutrps:h9l80ao50ael@142.111.67.146:5611",
-        "http://ffbutrps:h9l80ao50ael@191.96.254.138:6185",
-        "http://ffbutrps:h9l80ao50ael@31.58.9.4:6077",
-        "http://ffbutrps:h9l80ao50ael@64.137.10.153:5803"
-    ]
-    proxy = random.choice(PROXIES)
-    print(f"Using proxy: {proxy.split('@')[-1]}")
-    plugin_path = setup_proxy_extension(proxy)
-    options.add_argument(f'--load-extension={plugin_path}')
-    
+    # Load proxy extension if proxy is set
+    if PROXY_STRING:
+        try:
+            plugin_dir = setup_proxy_extension(PROXY_STRING)
+            options.add_argument(f"--load-extension={plugin_dir}")
+            print(f"[System] Proxy extension successfully injected: {PROXY_STRING.split('@')[-1]}")
+        except Exception as proxy_err:
+            print(f"[Warning] Failed to set up proxy extension: {proxy_err}")
+            
     # Configure required container sandbox arguments in cloud/Docker environments
     is_container = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
     if is_container:
+        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--window-size=1920,1080")
         
     return options
 
+class DiscordBridge:
+    def __init__(self, bot, ctx, email):
+        self.bot = bot
+        self.ctx = ctx
+        self.email = email
+        self.loop = asyncio.get_running_loop()
+
+    def get_otp(self):
+        """Blocks the Selenium thread and waits for the user response on Discord"""
+        future = asyncio.run_coroutine_threadsafe(self._async_get_otp(), self.loop)
+        return future.result()
+
+    async def _async_get_otp(self):
+        await self.ctx.send(
+            f"✉️ **OTP has been sent to `{self.email}`.**\n"
+            f"Please check your inbox and reply here with the 6-digit code, or reply `resend` to request a new code."
+        )
+
+        def check(m):
+            return m.author == self.ctx.author and m.channel == self.ctx.channel
+
+        try:
+            # Wait up to 5 minutes for user response
+            msg = await self.bot.wait_for('message', check=check, timeout=300.0)
+            return msg.content.strip()
+        except asyncio.TimeoutError:
+            await self.ctx.send("⏰ **Timeout:** No response received within 5 minutes. Aborting flow.")
+            return None
+
+    def notify_resend(self, success):
+        asyncio.run_coroutine_threadsafe(self._async_notify_resend(success), self.loop)
+
+    async def _async_notify_resend(self, success):
+        if success:
+            await self.ctx.send("🔄 **Resend requested successfully!** Waiting for your new 6-digit OTP code...")
+        else:
+            await self.ctx.send("⚠️ **Resend request failed.** Try entering the code manually.")
+
+    def ask_close_confirm(self):
+        """Blocks the Selenium thread and asks the user whether to close the browser/session"""
+        future = asyncio.run_coroutine_threadsafe(self._async_ask_close_confirm(), self.loop)
+        return future.result()
+
+    async def _async_ask_close_confirm(self):
+        await self.ctx.send(
+            f"🔄 **Session extracted for `{self.email}`.**\n"
+            f"Should we close the browser session? Reply **`yes`** to close it, or **`no`** to leave it running."
+        )
+
+        def check(m):
+            return m.author == self.ctx.author and m.channel == self.ctx.channel
+
+        while True:
+            try:
+                msg = await self.bot.wait_for('message', check=check, timeout=300.0)
+                content = msg.content.strip().lower()
+                if content in ['yes', 'y', 'close', 'true']:
+                    return True
+                elif content in ['no', 'n', 'false', 'keep']:
+                    return False
+                else:
+                    await self.ctx.send("⚠️ Please reply **`yes`** to close the session, or **`no`** to keep it running.")
+            except asyncio.TimeoutError:
+                # Still waiting indefinitely, ping user that it is still active
+                await self.ctx.send(f"⏳ **Still waiting:** Browser session for `{self.email}` is still active. Close it? (Reply **`yes`** / **`no`**)")
+            
+    def send_log(self, text):
+        asyncio.run_coroutine_threadsafe(self.ctx.send(text), self.loop)
+
+def run_flow(email, bridge):
+    max_retries = 3
+    retry_count = 0
+    last_driver = None
+
+    while retry_count < max_retries:
+        driver = create_driver()
+        wait = WebDriverWait(driver, 30)
+        last_driver = driver
+
+        try:
+            bridge.send_log("[*] Navigating to ChatGPT...")
+            driver.get('https://chatgpt.com/')
+            
+            time.sleep(1)
+            current_url = driver.current_url.lower()
+            
+            # Click ChatGPT login button
+            chatgpt_login_btn = None
+            try:
+                chatgpt_login_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='login-button']")))
+            except Exception:
+                try:
+                    chatgpt_login_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Log in') or contains(text(), 'Login')]")))
+                except Exception:
+                    try:
+                        chatgpt_login_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Log in') or contains(text(), 'Login')]")))
+                    except Exception:
+                        pass
+            
+            if not chatgpt_login_btn:
+                chatgpt_login_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='login-button']")))
+                
+            chatgpt_login_btn.click()
+            bridge.send_log("[*] Clicked Log in button.")
+            
+            # Enter email
+            chatgpt_email_input = wait.until(EC.element_to_be_clickable((By.ID, "email")))
+            chatgpt_email_input.clear()
+            chatgpt_email_input.send_keys(email)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", chatgpt_email_input)
+            
+            # Submit email
+            chatgpt_continue_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']")))
+            chatgpt_continue_btn.click()
+            bridge.send_log("[*] Submitted email address.")
+            
+            # Wait for code input field
+            code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
+            
+            # OTP prompt loop
+            while True:
+                otp = bridge.get_otp()
+                if not otp:
+                    raise Exception("OTP prompt timed out or cancelled by user.")
+                
+                if otp.lower() == 'resend':
+                    bridge.send_log("[*] Requesting resend of email verification code...")
+                    resend_btn = None
+                    for selector in [
+                        "button[name='intent'][value='resend']",
+                        "button[value='resend']",
+                        "//button[contains(text(), 'Resend email') or contains(., 'Resend')]"
+                    ]:
+                        try:
+                            if selector.startswith("//"):
+                                resend_btn = driver.find_element(By.XPATH, selector)
+                            else:
+                                resend_btn = driver.find_element(By.CSS_SELECTOR, selector)
+                            if resend_btn and resend_btn.is_displayed():
+                                break
+                        except:
+                            continue
+                    if resend_btn:
+                        resend_btn.click()
+                        bridge.notify_resend(True)
+                    else:
+                        bridge.notify_resend(False)
+                    continue
+                
+                # Assume user entered a 6 digit code
+                code_input.clear()
+                code_input.send_keys(otp)
+                driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
+                
+                verify_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='validate']")))
+                verify_btn.click()
+                
+                # Verify redirection
+                try:
+                    WebDriverWait(driver, 25).until(
+                        lambda d: "chatgpt.com" in d.current_url.lower() and "auth" not in d.current_url.lower()
+                    )
+                    bridge.send_log("[+] Login validated successfully!")
+                    time.sleep(3)
+                    break
+                except Exception:
+                    bridge.send_log("❌ **Validation Failed:** Invalid code or validation timeout. Please try again.")
+            
+            return True, driver
+            
+        except Exception as e:
+            print(f"Flow attempt {retry_count+1} failed:")
+            traceback.print_exc()
+            retry_count += 1
+            if driver:
+                try:
+                    driver.quit()
+                except:
+                    pass
+                driver = None
+            if retry_count < max_retries:
+                bridge.send_log(f"[*] Attempt {retry_count} failed. Restarting browser flow...")
+                time.sleep(3)
+                continue
+            else:
+                break
+                
+    return False, last_driver
+
 def create_driver(options=None):
+    is_headless = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
     try:
-        print("Initializing Chrome driver (auto-detect)...")
+        print(f"Initializing Chrome driver (auto-detect) | Headless: {is_headless}...")
         fresh_options = get_chrome_options()
-        return uc.Chrome(options=fresh_options, headless=False, use_subprocess=True)
+        return uc.Chrome(options=fresh_options, headless=is_headless, use_subprocess=True)
     except Exception as e:
         err_msg = str(e)
         print(f"Auto-detect failed: {err_msg}")
@@ -170,7 +356,7 @@ def create_driver(options=None):
             print(f"Self-Healing: Detected Chrome version {detected_ver}. Initializing driver...")
             try:
                 retry_options = get_chrome_options()
-                return uc.Chrome(options=retry_options, version_main=detected_ver, headless=False, use_subprocess=True)
+                return uc.Chrome(options=retry_options, version_main=detected_ver, headless=is_headless, use_subprocess=True)
             except Exception as retry_err:
                 print(f"Self-Healing retry failed for version {detected_ver}: {retry_err}")
 
@@ -198,7 +384,7 @@ def create_driver(options=None):
                 try:
                     print(f"Initializing Chrome driver with version_main={major_version}...")
                     reg_options = get_chrome_options()
-                    return uc.Chrome(options=reg_options, version_main=major_version, headless=False, use_subprocess=True)
+                    return uc.Chrome(options=reg_options, version_main=major_version, headless=is_headless, use_subprocess=True)
                 except Exception as reg_err:
                     print(f"Failed with version_main={major_version}: {reg_err}")
 
@@ -206,388 +392,13 @@ def create_driver(options=None):
             try:
                 print(f"Initializing Chrome driver with fallback version_main={ver}...")
                 fallback_options = get_chrome_options()
-                return uc.Chrome(options=fallback_options, version_main=ver, headless=False, use_subprocess=True)
+                return uc.Chrome(options=fallback_options, version_main=ver, headless=is_headless, use_subprocess=True)
             except Exception:
                 pass
 
         print("All Chrome driver initialization attempts failed. Trying final fallback...")
         final_options = get_chrome_options()
-        return uc.Chrome(options=final_options, headless=False, use_subprocess=True)
-
-def clear_session_file():
-    try:
-        if os.path.exists(SESSION_FILE_PATH):
-            os.remove(SESSION_FILE_PATH)
-            print("Cleared previous session file")
-    except Exception:
-        pass
-
-def run_flow(email, password):
-    max_retries = 2
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        clear_session_file()
-        
-        driver = create_driver()
-        wait = WebDriverWait(driver, 30)
-
-        try:
-            driver.get(URL)
-            print("Navigated to Outlook URL successfully.")
-            
-            original_window = driver.current_window_handle
-            
-            driver.switch_to.new_window('tab')
-            chatgpt_window = driver.current_window_handle
-            driver.get('https://chatgpt.com/')
-            print("Opened ChatGPT in a second tab.")
-            
-            time.sleep(1)
-            current_url = driver.current_url.lower()
-            print(f"Current ChatGPT URL: {current_url}")
-            
-            if "/auth/login" in current_url or "auth/login" in current_url:
-                print("Detected /auth/login page - restarting flow...")
-                retry_count += 1
-                driver.quit()
-                driver = None
-                print(f"Restart attempt {retry_count}/{max_retries}...")
-                time.sleep(2)
-                continue
-            
-            print("Waiting for ChatGPT login button...")
-            chatgpt_login_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='login-button']")))
-            chatgpt_login_btn.click()
-            print("Clicked ChatGPT Log in button.")
-            
-            print("Waiting for ChatGPT email input...")
-            chatgpt_email_input = wait.until(EC.element_to_be_clickable((By.ID, "email")))
-            chatgpt_email_input.clear()
-            chatgpt_email_input.send_keys(email)
-                
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", chatgpt_email_input)
-            print("Entered email into ChatGPT successfully.")
-            
-            print("Waiting for ChatGPT Continue button...")
-            chatgpt_continue_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']")))
-            chatgpt_continue_btn.click()
-            print("Clicked ChatGPT Continue button.")
-            
-            driver.switch_to.window(original_window)
-            
-            print(f"Typing email: {email}")
-            email_input = wait.until(EC.element_to_be_clickable((By.ID, "i0116")))
-            email_input.clear()
-            email_input.send_keys(email)
-                
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
-            print("Email entered successfully.")
-            
-            time.sleep(1)
-            next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
-            next_btn.click()
-            print("Clicked 'Next' button.")
-
-            print("Waiting for password field...")
-            password_input = wait.until(EC.element_to_be_clickable((By.ID, "passwordEntry")))
-            password_input.clear()
-            password_input.send_keys(password)
-                
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
-            print("Password entered successfully.")
-            
-            time.sleep(1)
-            submit_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='primaryButton']")))
-            submit_btn.click()
-            print("Clicked 'Next' (Submit) button.")
-            
-            print("Checking for 'Skip for now' / security setup prompts...")
-            time.sleep(2)
-            for i in range(7):
-                try:
-                    cancel_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Cancel')] | //input[@id='idCancel'] | //*[@id='idCancel'] | //input[@value='Cancel'] | //*[contains(text(), 'Cancel')]")
-                    passkey_header = driver.find_elements(By.XPATH, "//*[contains(text(), 'Setting up your passkey') or contains(text(), 'passkey')]")
-                    
-                    if cancel_btns and (cancel_btns[0].is_displayed() or (passkey_header and len(passkey_header) > 0)):
-                        cancel_btns[0].click()
-                        print(f"Clicked Microsoft Passkey setup 'Cancel' button (Attempt {i+1})!")
-                        time.sleep(4)
-                        continue
-                    
-                    skip_btns = driver.find_elements(By.ID, "iShowSkip")
-                    if skip_btns and skip_btns[0].is_displayed():
-                        skip_btns[0].click()
-                        print(f"Clicked 'Skip for now' (Attempt {i+1}).")
-                        time.sleep(3)
-                    else:
-                        skip_btns_xpath = driver.find_elements(By.XPATH, "//*[contains(@id, 'iShowSkip') or contains(text(), 'Skip for now')]")
-                        if skip_btns_xpath and skip_btns_xpath[0].is_displayed():
-                            skip_btns_xpath[0].click()
-                            print(f"Clicked 'Skip for now' via XPath (Attempt {i+1}).")
-                            time.sleep(3)
-                        else:
-                            break
-                except Exception as e_skip:
-                    print(f"Skip/Cancel loop iteration {i+1} handled exception: {e_skip}")
-                    break
-            
-            print("Waiting for 'Stay signed in' prompt...")
-            try:
-                no_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='secondaryButton']")))
-                no_btn.click()
-                print("Clicked 'No' button on 'Stay signed in' prompt.")
-            except Exception:
-                try:
-                    no_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'No') or contains(text(), 'no')]")))
-                    no_btn.click()
-                    print("Clicked 'No' button on 'Stay signed in' prompt via text match.")
-                except Exception as stay_signed_err:
-                    print("Stay signed in prompt did not appear or failed:", stay_signed_err)
-            
-            print("Inbox loaded. Searching for ChatGPT verification emails...")
-            time.sleep(1)
-            chatgpt_email_found = False
-            extracted_code = None
-            
-            try:
-                search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
-                search_input.click()
-                time.sleep(1)
-                search_input.clear()
-                
-                search_term = "chatgpt code"
-                print(f"Typing search query: {search_term}")
-                search_input.send_keys(search_term)
-                    
-                time.sleep(0.5)
-                search_input.send_keys("\n")
-                print("Search submitted successfully.")
-                
-                print("Waiting for search results to display...")
-                time.sleep(2)
-                
-                empty_state = driver.find_elements(By.XPATH, "//span[contains(text(), 'No more results to show')]")
-                if empty_state:
-                    print("No search results found! Opening TOPMOST email...")
-                    time.sleep(0.5)
-                    top_email = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")))
-                    top_email.click()
-                    print("Clicked TOPMOST email!")
-                    chatgpt_email_found = True
-                else:
-                    items = driver.find_elements(By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")
-                    print(f"Found {len(items)} email list items to scan.")
-                    
-                    for item in items:
-                        text = (item.text or "")
-                        aria_label = (item.get_attribute("aria-label") or "")
-                        combined_text = (text + " " + aria_label).lower()
-                        
-                        if "chatgpt" in combined_text and "verification code" in combined_text or "temporary chatgpt login code" in combined_text:
-                            code_match = re.search(r'verification code\D*(\d{6})', combined_text, re.IGNORECASE)
-                            if code_match:
-                                extracted_code = code_match.group(1)
-                                print(f"Extracted verification code from preview: {extracted_code}")
-                            
-                            item.click()
-                            print("Clicked ChatGPT verification email!")
-                            chatgpt_email_found = True
-                            break
-            except Exception as scan_err:
-                print("Error during search and scan:", scan_err)
-                
-            if not chatgpt_email_found:
-                print("OpenAI verification email not found. Attempting Resend Email procedure...")
-                try:
-                    driver.switch_to.window(chatgpt_window)
-                    print("Switched to ChatGPT window to trigger resend...")
-                    
-                    time.sleep(0.5)
-                    resend_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='resend']")))
-                    resend_btn.click()
-                    print("Clicked 'Resend email' button in ChatGPT!")
-                    
-                    driver.switch_to.window(original_window)
-                    print("Switched back to Outlook window...")
-                    time.sleep(4)
-                    
-                    search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
-                    search_input.click()
-                    search_input.clear()
-                    search_input.send_keys("chatgpt code")
-                    search_input.send_keys("\n")
-                    print("Search refreshed.")
-                    time.sleep(3)
-                    
-                    empty_state = driver.find_elements(By.XPATH, "//span[contains(text(), 'No more results to show')]")
-                    if empty_state:
-                        print("No search results! Opening TOPMOST email...")
-                        time.sleep(2)
-                        top_email = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")))
-                        top_email.click()
-                        print("Clicked TOPMOST email!")
-                        chatgpt_email_found = True
-                    else:
-                        items = driver.find_elements(By.CSS_SELECTOR, "div[data-focusable-row='true'][role='option']")
-                        for item in items:
-                            text = (item.text or "")
-                            aria_label = (item.get_attribute("aria-label") or "")
-                            combined_text = (text + " " + aria_label).lower()
-                            
-                            if "chatgpt" in combined_text and "verification code" in combined_text or "temporary chatgpt login code" in combined_text:
-                                code_match = re.search(r'verification code\D*(\d{6})', combined_text, re.IGNORECASE)
-                                if code_match:
-                                    extracted_code = code_match.group(1)
-                                    print(f"Extracted verification code: {extracted_code}")
-                                item.click()
-                                print("Clicked ChatGPT verification email!")
-                                chatgpt_email_found = True
-                                break
-                except Exception as resend_err:
-                    print("Failed to auto-resend:", resend_err)
-                    
-            if not chatgpt_email_found:
-                print("OpenAI verification email not found in scan loop.")
-                # Keeping browser open as requested
-                return False, None
-                
-            time.sleep(5)
-
-            print("Monitoring for OpenAI verification codes...")
-            
-            start_time = time.time()
-            last_resend_time = time.time()
-            while time.time() - start_time < 300:
-                try:
-                    if time.time() - last_resend_time > 30:
-                        print("OTP code has not arrived in 30 seconds. Switching to ChatGPT to resend...")
-                        try:
-                            driver.switch_to.window(chatgpt_window)
-                            time.sleep(0.5)
-                            
-                            resend_btn = None
-                            for selector in [
-                                "button[name='intent'][value='resend']",
-                                "button[value='resend']",
-                                "//button[contains(text(), 'Resend email') or contains(., 'Resend')]"
-                            ]:
-                                try:
-                                    if selector.startswith("//"):
-                                        resend_btn = driver.find_element(By.XPATH, selector)
-                                    else:
-                                        resend_btn = driver.find_element(By.CSS_SELECTOR, selector)
-                                    if resend_btn and resend_btn.is_displayed():
-                                        break
-                                except:
-                                    continue
-                            
-                            if resend_btn:
-                                resend_btn.click()
-                                print("Clicked 'Resend email' button in ChatGPT!")
-                                time.sleep(2)
-                            else:
-                                print("Resend email button not found on ChatGPT tab.")
-                                
-                            driver.switch_to.window(original_window)
-                            print("Switched back to Outlook window. Refreshing search...")
-                            
-                            search_input = wait.until(EC.element_to_be_clickable((By.ID, "topSearchInput")))
-                            search_input.click()
-                            search_input.clear()
-                            search_input.send_keys("chatgpt code")
-                            search_input.send_keys("\n")
-                            time.sleep(3)
-                        except Exception as resend_err:
-                            print("Failed to auto-resend during monitoring loop:", resend_err)
-                            try:
-                                driver.switch_to.window(original_window)
-                            except:
-                                pass
-                        
-                        last_resend_time = time.time()
-
-                    code_to_enter = None
-                    
-                    try:
-                        elements = driver.find_elements(By.XPATH, "//*[contains(@style, 'Menlo') or contains(@style, 'Monaco') or contains(@style, 'F3F3F3')]")
-                        for elem in elements:
-                            text = elem.text.strip()
-                            if len(text) == 6 and text.isdigit():
-                                code_to_enter = text
-                                print(f"Copied code from styled element: {code_to_enter}")
-                                break
-                    except Exception:
-                        pass
-                    
-                    if not code_to_enter and extracted_code:
-                        code_to_enter = extracted_code
-                        print(f"Using pre-extracted code: {code_to_enter}")
-                    
-                    if not code_to_enter:
-                        try:
-                            page_text = driver.find_element(By.TAG_NAME, "body").text
-                            match = re.search(r'(?:continue|code):\s*(\d{6})', page_text, re.IGNORECASE)
-                            if match:
-                                code_to_enter = match.group(1)
-                            else:
-                                matches = re.findall(r'\b\d{6}\b', page_text)
-                                if matches:
-                                    code_to_enter = matches[0]
-                        except Exception:
-                            pass
-                                
-                    if code_to_enter:
-                        print(f"FOUND VERIFICATION CODE: {code_to_enter}")
-                        
-                        driver.switch_to.window(chatgpt_window)
-                        print("Entering code in ChatGPT...")
-                        
-                        code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
-                        code_input.clear()
-                        code_input.send_keys(code_to_enter)
-                        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
-                        
-                        try:
-                            time.sleep(0.5)
-                            verify_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='validate']")))
-                            verify_btn.click()
-                            print("Clicked Continue to verify.")
-                            
-                            # Wait for redirect to finish and dashboard to load
-                            print("Waiting for login to complete and redirect back to ChatGPT...")
-                            WebDriverWait(driver, 35).until(
-                                lambda d: "chatgpt.com" in d.current_url.lower() and "auth" not in d.current_url.lower()
-                            )
-                            print("Redirect successful. User is fully logged in!")
-                            time.sleep(3) # Let session and cookies settle
-                        except Exception as e_verify:
-                            print(f"Warning during post-verification redirection: {e_verify}")
-                            time.sleep(8)
-                        
-                        return True, driver
-                except Exception as e:
-                    print("Error during code checking cycle:", e)
-                
-                time.sleep(2)
-            
-            print("Search timed out.")
-            # Keeping browser open as requested
-            return False, None
-            
-        except Exception as e:
-            print("Flow failed:")
-            traceback.print_exc()
-            # Keeping browser open as requested
-            return False, None
-
-def save_session_to_file(pre_text):
-    try:
-        with open(SESSION_FILE_PATH, 'w', encoding='utf-8') as f:
-            f.write(pre_text)
-        print(f"Saved to: {os.path.abspath(SESSION_FILE_PATH)}")
-    except Exception as e:
-        print(f"Failed to save: {e}")
+        return uc.Chrome(options=final_options, headless=is_headless, use_subprocess=True)
 
 def fill_profile_form(driver):
     print("Waiting for profile registration form to load...")
@@ -639,52 +450,6 @@ def fill_profile_form(driver):
             print("="*50)
             print(pre_text)
             print("="*50)
-            try:
-                print("Opening https://askaboutme.shop/ in a new tab...")
-                driver.switch_to.new_window('tab')
-                driver.get("https://askaboutme.shop/")
-                
-                print("Waiting for Discord username input field...")
-                wait_shop = WebDriverWait(driver, 15)
-                username_input = wait_shop.until(EC.element_to_be_clickable((By.ID, "discordUsername")))
-                username_input.clear()
-                username_input.send_keys("w6wf")
-                driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", username_input)
-                print("[Success] Entered w6wf into Discord username field.")
-                
-                time.sleep(0.5)
-                print("Waiting for Continue button...")
-                continue_btn = wait_shop.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(@onclick, 'goStep2') or contains(., 'Continue')]")))
-                continue_btn.click()
-                print("[Success] Clicked Continue button.")
-                
-                time.sleep(1)
-                print("Waiting for session input textarea...")
-                textarea = wait_shop.until(EC.presence_of_element_located((By.ID, "sessionInput")))
-                textarea.clear()
-                
-                # Compress the JSON to remove all formatting spaces and newlines
-                try:
-                    session_json = json.loads(pre_text)
-                    clean_json_str = json.dumps(session_json, separators=(',', ':'))
-                except Exception:
-                    clean_json_str = pre_text.strip()
-                
-                # Direct JS injection to avoid key-by-key typing issues and preserve pristine format
-                driver.execute_script("arguments[0].value = arguments[1];", textarea, clean_json_str)
-                driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", textarea)
-                driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", textarea)
-                print("[Success] Pasted full session JSON into textarea.")
-                
-                time.sleep(0.5)
-                print("Waiting for submit button...")
-                submit_btn = wait_shop.until(EC.element_to_be_clickable((By.ID, "submitBtn")))
-                submit_btn.click()
-                print("[Success] Clicked submit session button.")
-                
-                time.sleep(3)
-            except Exception as e_tab:
-                print(f"Failed to automate site: {e_tab}")
             return pre_text
         except Exception as e:
             print(f"[-] Session JSON not found. Page URL: {driver.current_url} | Title: {driver.title}")
@@ -906,52 +671,6 @@ def fill_profile_form(driver):
         print("="*50)
         print(pre_text)
         print("="*50)
-        try:
-            print("Opening https://askaboutme.shop/ in a new tab...")
-            driver.switch_to.new_window('tab')
-            driver.get("https://askaboutme.shop/")
-            
-            print("Waiting for Discord username input field...")
-            wait_shop = WebDriverWait(driver, 15)
-            username_input = wait_shop.until(EC.element_to_be_clickable((By.ID, "discordUsername")))
-            username_input.clear()
-            username_input.send_keys("w6wf")
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", username_input)
-            print("[Success] Entered w6wf into Discord username field.")
-            
-            time.sleep(0.5)
-            print("Waiting for Continue button...")
-            continue_btn = wait_shop.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(@onclick, 'goStep2') or contains(., 'Continue')]")))
-            continue_btn.click()
-            print("[Success] Clicked Continue button.")
-            
-            time.sleep(1)
-            print("Waiting for session input textarea...")
-            textarea = wait_shop.until(EC.presence_of_element_located((By.ID, "sessionInput")))
-            textarea.clear()
-            
-            # Compress the JSON to remove all formatting spaces and newlines
-            try:
-                session_json = json.loads(pre_text)
-                clean_json_str = json.dumps(session_json, separators=(',', ':'))
-            except Exception:
-                clean_json_str = pre_text.strip()
-            
-            # Direct JS injection to avoid key-by-key typing issues and preserve pristine format
-            driver.execute_script("arguments[0].value = arguments[1];", textarea, clean_json_str)
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", textarea)
-            driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", textarea)
-            print("[Success] Pasted full session JSON into textarea.")
-            
-            time.sleep(0.5)
-            print("Waiting for submit button...")
-            submit_btn = wait_shop.until(EC.element_to_be_clickable((By.ID, "submitBtn")))
-            submit_btn.click()
-            print("[Success] Clicked submit session button.")
-            
-            time.sleep(3)
-        except Exception as e_tab:
-            print(f"Failed to automate site: {e_tab}")
         return pre_text
     except Exception as e:
         err_str = str(e).lower()
@@ -964,22 +683,6 @@ def fill_profile_form(driver):
             print(f"[-] Page Body Snippet: {body_text}")
         except Exception:
             pass
-        return None
-
-def fetch_session_only(driver):
-    if not driver:
-        return None
-    try:
-        print("Fetching session for plan check...")
-        driver.switch_to.new_window('tab')
-        driver.get(CHATGPT_SESSION_URL)
-        time.sleep(3)
-        wait = WebDriverWait(driver, 15)
-        pre_element = wait.until(EC.presence_of_element_located((By.TAG_NAME, "pre")))
-        pre_text = pre_element.text
-        return pre_text
-    except Exception as e:
-        print(f"Error fetching session for plan check: {e}")
         return None
 
 # --- ACCESS CONTROL SYSTEM ---
@@ -1016,6 +719,8 @@ def check_authorization(ctx):
 # --- BACKGROUND PROCESS MANAGEMENT ---
 active_checks = 0
 active_checks_lock = threading.Lock()
+active_drivers = {}
+active_drivers_lock = threading.Lock()
 
 def cleanup_chrome_processes():
     gc.collect()
@@ -1028,34 +733,105 @@ def cleanup_chrome_processes():
         except Exception as pe:
             print(f"Error cleaning dangling Chrome processes: {pe}")
 
-async def run_onboarding_background(ctx, email, password):
+async def run_onboarding_background(ctx, bot, email):
     async with bot_semaphore:
         with active_checks_lock:
             global active_checks
             active_checks += 1
 
         local_driver = None
+        bridge = DiscordBridge(bot, ctx, email)
         try:
-            success, local_driver = await asyncio.to_thread(run_flow, email, password)
+            success, local_driver = await asyncio.to_thread(run_flow, email, bridge)
             if success and local_driver:
+                with active_drivers_lock:
+                    active_drivers[email] = local_driver
+                
                 session_text = await asyncio.to_thread(fill_profile_form, local_driver)
                 if session_text:
-                    print(f"[System] Onboarding complete for {email}.")
+                    bridge.send_log(f"[System] Onboarding complete for {email}. Compiling session data...")
+                    
+                    # Save session to a temp file and send it
+                    filename = f"session_{email.replace('@', '_').replace('.', '_')}.txt"
+                    with open(filename, "w", encoding="utf-8") as f:
+                        f.write(session_text)
+                    
+                    if os.path.exists(filename):
+                        discord_file = discord.File(filename)
+                        await ctx.send(content=f"✅ **Session Created Successfully!** Here is the raw ChatGPT session for `{email}`:", file=discord_file)
+                        os.remove(filename)
                 else:
-                    await ctx.send(f"Sorry, onboarding failed for {email} (could not retrieve session). Please try again.")
+                    screenshot_sent = False
+                    if local_driver:
+                        try:
+                            screenshot_path = "error_screenshot.png"
+                            local_driver.save_screenshot(screenshot_path)
+                            if os.path.exists(screenshot_path):
+                                file = discord.File(screenshot_path)
+                                await ctx.send(content=f"Sorry, onboarding failed for {email} (could not retrieve session). Here is the browser state:", file=file)
+                                screenshot_sent = True
+                                os.remove(screenshot_path)
+                        except Exception as ss_err:
+                            print(f"Failed to capture debug screenshot: {ss_err}")
+                    if not screenshot_sent:
+                        await ctx.send(f"Sorry, onboarding failed for {email} (could not retrieve session). Please try again.")
             else:
-                await ctx.send(f"Sorry, onboarding failed for {email} (could not complete login flow). Please try again.")
+                screenshot_sent = False
+                if local_driver:
+                    try:
+                        screenshot_path = "error_screenshot.png"
+                        local_driver.save_screenshot(screenshot_path)
+                        if os.path.exists(screenshot_path):
+                            file = discord.File(screenshot_path)
+                            await ctx.send(content=f"Sorry, onboarding failed for {email} (could not complete login flow). Here is what the browser saw:", file=file)
+                            screenshot_sent = True
+                            os.remove(screenshot_path)
+                    except Exception as ss_err:
+                        print(f"Failed to capture debug screenshot: {ss_err}")
+                if not screenshot_sent:
+                    await ctx.send(f"Sorry, onboarding failed for {email} (could not complete login flow). Please try again.")
         except Exception as e:
             print(f"[Error] Onboarding background task error: {e}")
             traceback.print_exc()
-            await ctx.send(f"Sorry, onboarding failed for {email} due to an error. Please try again.")
-        finally:
+            screenshot_sent = False
+            if local_driver:
+                try:
+                    screenshot_path = "error_screenshot.png"
+                    local_driver.save_screenshot(screenshot_path)
+                    if os.path.exists(screenshot_path):
+                        file = discord.File(screenshot_path)
+                        await ctx.send(content=f"Sorry, onboarding failed for {email} due to an error. Here is what the browser saw at the time of failure:", file=file)
+                        screenshot_sent = True
+                        os.remove(screenshot_path)
+                except Exception as ss_err:
+                    print(f"Failed to capture debug screenshot: {ss_err}")
+            if not screenshot_sent:
+                await ctx.send(f"Sorry, onboarding failed for {email} due to an error. Please try again.")
             if local_driver:
                 try:
                     local_driver.quit()
-                    print("[System] Browser closed successfully.")
+                    print("[System] Browser closed successfully due to error.")
                 except:
                     pass
+                with active_drivers_lock:
+                    if email in active_drivers:
+                        del active_drivers[email]
+                local_driver = None
+        finally:
+            if local_driver:
+                should_close = await asyncio.to_thread(bridge.ask_close_confirm)
+                if should_close:
+                    try:
+                        local_driver.quit()
+                        print("[System] Browser closed successfully.")
+                    except:
+                        pass
+                else:
+                    print("[System] Keeping browser running as requested by user.")
+                
+                with active_drivers_lock:
+                    if email in active_drivers:
+                        del active_drivers[email]
 
             with active_checks_lock:
                 active_checks -= 1
@@ -1066,8 +842,7 @@ async def run_onboarding_background(ctx, email, password):
                 cleanup_chrome_processes()
 
 # --- DISCORD BOT SETUP ---
-intents = discord.Intents.default()
-intents.message_content = True
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
@@ -1081,25 +856,55 @@ async def on_command_error(ctx, error):
     else:
         print(f"Error executing command: {error}")
 
-@bot.command(name="qr")
-@commands.check(check_authorization)
-async def qr_command(ctx, *, credentials: str = ""):
-    """Automate ChatGPT onboarding and submit session details for a QR code"""
-    if not credentials:
-        await ctx.send("[Warning] Invalid format! Please use: !qr email:password")
+@bot.command(name="session")
+async def session_command(ctx, *, email: str = ""):
+    """Automate ChatGPT onboarding and export session details inside a .txt file"""
+    if not email:
+        await ctx.send("[Warning] Invalid format! Please use: !session email")
         return
 
-    if ":" not in credentials:
-        await ctx.send("[Warning] Invalid format! Please use: !qr email:password")
-        return
-
-    email, password = credentials.split(":", 1)
     email = email.strip()
-    password = password.strip()
+    asyncio.create_task(run_onboarding_background(ctx, bot, email))
+    await ctx.send(f"[Success] Session process initiated for `{email}`. Follow instructions below for OTP...")
 
-    asyncio.create_task(run_onboarding_background(ctx, email, password))
-
-    await ctx.send("[Success] Session submission initiated. The generated QR code will soon arrive in your DMs.")
+@bot.command(name="close")
+async def close_command(ctx, *, email: str = ""):
+    """Force close a running ChatGPT browser session. If no email is provided, closes all active browser sessions."""
+    email = email.strip()
+    
+    if not email:
+        closed_count = 0
+        with active_drivers_lock:
+            emails_to_close = list(active_drivers.keys())
+            for email_key in emails_to_close:
+                driver = active_drivers[email_key]
+                try:
+                    driver.quit()
+                    closed_count += 1
+                except Exception as e:
+                    print(f"Failed to quit driver for {email_key} on !close: {e}")
+                del active_drivers[email_key]
+        if closed_count > 0:
+            await ctx.send(f"✅ **Closed all active browser sessions ({closed_count} total).**")
+        else:
+            await ctx.send("❌ **No active browser sessions found to close.**")
+        return
+        
+    closed = False
+    with active_drivers_lock:
+        if email in active_drivers:
+            driver = active_drivers[email]
+            try:
+                driver.quit()
+                closed = True
+            except Exception as e:
+                print(f"Failed to quit driver on !close for {email}: {e}")
+            del active_drivers[email]
+            
+    if closed:
+        await ctx.send(f"✅ **Browser session for `{email}` has been forced closed successfully.**")
+    else:
+        await ctx.send(f"❌ **No active browser session found for `{email}`.**")
 
 # --- USER MANAGEMENT COMMANDS (OWNER ONLY) ---
 def extract_userid(user_input):
@@ -1219,7 +1024,20 @@ def keep_awake():
             print(f"[System] Self-ping failed: {e}")
         time.sleep(600)
 
+import subprocess
+
 if __name__ == "__main__":
+    # Programmatically spawn Xvfb inside the container for headful Turnstile bypasses without xvfb-run wrapper hangs
+    is_container = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
+    if is_container:
+        try:
+            print("[System] Starting virtual display Xvfb in background...", flush=True)
+            subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.environ["DISPLAY"] = ":99"
+            print("[System] Virtual display Xvfb successfully initialized on display :99.", flush=True)
+        except Exception as xvfb_err:
+            print(f"[Warning] Failed to start background Xvfb: {xvfb_err}", flush=True)
+
     port_env = os.getenv("PORT")
     if port_env:
         port = int(port_env)
@@ -1227,12 +1045,9 @@ if __name__ == "__main__":
         threading.Thread(target=keep_awake, daemon=True).start()
 
     BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
-    if not BOT_TOKEN:
-        print("[Error] Discord Bot Token not found! Please set the DISCORD_TOKEN or BOT_TOKEN environment variable in your Railway dashboard or .env file.")
-        sys.exit(1)
     
     # Mask and log the loaded token for verification
     masked_token = BOT_TOKEN[:10] + "..." if len(BOT_TOKEN) > 10 else BOT_TOKEN
-    print(f"[System] Bot Token successfully loaded: {masked_token}")
-    print("Starting Outlook and ChatGPT Onboarding Bot...")
+    print(f"[System] Bot Token successfully loaded: {masked_token}", flush=True)
+    print("Starting Outlook and ChatGPT Onboarding Bot...", flush=True)
     bot.run(BOT_TOKEN)

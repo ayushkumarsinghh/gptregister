@@ -295,9 +295,18 @@ def run_flow(email, bridge):
                 
                 # Fetch fresh code_input locator on every iteration to avoid stale element reference exceptions
                 code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
+                code_input.click()
+                time.sleep(0.5)
                 code_input.clear()
-                code_input.send_keys(otp)
+                time.sleep(0.5)
+                
+                # Type OTP slowly character-by-character to mimic human behavior
+                for digit in otp:
+                    code_input.send_keys(digit)
+                    time.sleep(random.uniform(0.3, 0.7))
+                    
                 driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
+                time.sleep(1.2)
                 
                 verify_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='validate']")))
                 try:

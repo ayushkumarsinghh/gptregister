@@ -289,7 +289,10 @@ def run_flow(email, bridge):
                 driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
                 
                 verify_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='validate']")))
-                verify_btn.click()
+                try:
+                    verify_btn.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", verify_btn)
                 
                 # Verify redirection
                 try:

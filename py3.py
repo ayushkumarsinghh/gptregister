@@ -315,9 +315,12 @@ def run_flow(email, bridge):
                     except Exception:
                         driver.execute_script("arguments[0].click();", verify_btn)
                     
-                    # Verify redirection
+                    # Verify redirection (allow onboarding pages like chatgpt.com/auth/onboarding to pass)
                     WebDriverWait(driver, 60).until(
-                        lambda d: "chatgpt.com" in d.current_url.lower() and "auth" not in d.current_url.lower()
+                        lambda d: "chatgpt.com" in d.current_url.lower() and 
+                                  "auth.openai.com" not in d.current_url.lower() and 
+                                  "auth0.openai.com" not in d.current_url.lower() and 
+                                  "auth/login" not in d.current_url.lower()
                     )
                     bridge.send_log("[+] Login validated successfully!")
                     time.sleep(3)

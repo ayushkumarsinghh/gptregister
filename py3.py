@@ -293,36 +293,43 @@ def run_flow(email, bridge):
                         bridge.notify_resend(False)
                     continue
                 
-                # Fetch fresh code_input locator on every iteration to avoid stale element reference exceptions
-                code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
-                code_input.click()
-                time.sleep(0.5)
-                code_input.clear()
-                time.sleep(0.5)
-                
-                # Type OTP slowly character-by-character to mimic human behavior
-                for digit in otp:
-                    code_input.send_keys(digit)
-                    time.sleep(random.uniform(0.3, 0.7))
+                try:
+                    # Fetch fresh code_input locator on every iteration to avoid stale element reference exceptions
+                    code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
+                    code_input.click()
+                    time.sleep(0.5)
+                    code_input.clear()
+                    time.sleep(0.5)
                     
-                driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
-                time.sleep(1.2)
-                
-                verify_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='validate']")))
-                try:
-                    verify_btn.click()
-                except Exception:
-                    driver.execute_script("arguments[0].click();", verify_btn)
-                
-                # Verify redirection
-                try:
+                    # Type OTP slowly character-by-character to mimic human behavior
+                    for digit in otp:
+                        code_input.send_keys(digit)
+                        time.sleep(random.uniform(0.3, 0.7))
+                        
+                    driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
+                    time.sleep(1.2)
+                    
+                    verify_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='validate']")))
+                    try:
+                        verify_btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", verify_btn)
+                    
+                    # Verify redirection
                     WebDriverWait(driver, 60).until(
                         lambda d: "chatgpt.com" in d.current_url.lower() and "auth" not in d.current_url.lower()
                     )
                     bridge.send_log("[+] Login validated successfully!")
                     time.sleep(3)
                     break
-                except Exception:
+                except Exception as loop_err:
+                    # Check if driver is disconnected/dead
+                    try:
+                        driver.title
+                    except Exception:
+                        print("Chrome driver disconnected. Propagating error to restart browser.")
+                        raise loop_err
+
                     try:
                         current_url = driver.current_url
                         page_title = driver.title

@@ -293,14 +293,22 @@ def run_flow(email, bridge):
                 
                 # Verify redirection
                 try:
-                    WebDriverWait(driver, 25).until(
+                    WebDriverWait(driver, 60).until(
                         lambda d: "chatgpt.com" in d.current_url.lower() and "auth" not in d.current_url.lower()
                     )
                     bridge.send_log("[+] Login validated successfully!")
                     time.sleep(3)
                     break
                 except Exception:
-                    bridge.send_log("❌ **Validation Failed:** Invalid code or validation timeout. Please try again.")
+                    try:
+                        current_url = driver.current_url
+                        page_title = driver.title
+                        # Also take a fresh screenshot on validation failure to debug
+                        driver.save_screenshot("flow_error_debug.png")
+                    except:
+                        current_url = "unknown"
+                        page_title = "unknown"
+                    bridge.send_log(f"❌ **Validation Failed:** Invalid code or validation timeout.\n* **URL**: `{current_url}`\n* **Title**: `{page_title}`\nPlease try again.")
             
             return True, driver
             

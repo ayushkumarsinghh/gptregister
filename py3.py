@@ -252,9 +252,6 @@ def run_flow(email, bridge):
             chatgpt_continue_btn.click()
             bridge.send_log("[*] Submitted email address.")
             
-            # Wait for code input field
-            code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
-            
             # OTP prompt loop
             while True:
                 otp = bridge.get_otp()
@@ -285,7 +282,8 @@ def run_flow(email, bridge):
                         bridge.notify_resend(False)
                     continue
                 
-                # Assume user entered a 6 digit code
+                # Fetch fresh code_input locator on every iteration to avoid stale element reference exceptions
+                code_input = wait.until(EC.element_to_be_clickable((By.NAME, "code")))
                 code_input.clear()
                 code_input.send_keys(otp)
                 driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)

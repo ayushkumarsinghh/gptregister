@@ -205,6 +205,17 @@ class DiscordBridge:
     def send_log(self, text):
         asyncio.run_coroutine_threadsafe(self.ctx.send(text), self.loop)
 
+    def send_file(self, file_path, content=None):
+        asyncio.run_coroutine_threadsafe(self._async_send_file(file_path, content), self.loop)
+
+    async def _async_send_file(self, file_path, content=None):
+        if os.path.exists(file_path):
+            try:
+                file = discord.File(file_path)
+                await self.ctx.send(content=content, file=file)
+            except Exception as e:
+                print(f"Failed to send file {file_path} to Discord: {e}")
+
 def run_flow(email, bridge):
     max_retries = 3
     retry_count = 0
@@ -311,7 +322,15 @@ def run_flow(email, bridge):
                     except:
                         current_url = "unknown"
                         page_title = "unknown"
-                    bridge.send_log(f"❌ **Validation Failed:** Invalid code or validation timeout.\n* **URL**: `{current_url}`\n* **Title**: `{page_title}`\nPlease try again.")
+                    msg = f"❌ **Validation Failed:** Invalid code or validation timeout.\n* **URL**: `{current_url}`\n* **Title**: `{page_title}`\nPlease try again."
+                    if os.path.exists("flow_error_debug.png"):
+                        bridge.send_file("flow_error_debug.png", content=msg)
+                        try:
+                            os.remove("flow_error_debug.png")
+                        except:
+                            pass
+                    else:
+                        bridge.send_log(msg)
             
             return True, driver
             

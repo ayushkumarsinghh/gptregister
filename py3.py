@@ -343,6 +343,16 @@ def run_flow(email, bridge):
                     print("[Debug] Saved error state screenshot as flow_error_debug.png")
                 except Exception as ss_err:
                     print(f"Failed to save error screenshot: {ss_err}")
+            err_msg = str(e)
+            if "OTP prompt timed out" in err_msg:
+                # User did not reply, abort immediately
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                return False, None
+
             retry_count += 1
             if driver:
                 try:
@@ -357,7 +367,7 @@ def run_flow(email, bridge):
             else:
                 break
                 
-    return False, last_driver
+    return False, None
 
 def create_driver(options=None):
     is_headless = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'

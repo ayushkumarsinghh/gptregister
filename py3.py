@@ -137,10 +137,11 @@ def get_chrome_options():
     return options
 
 class DiscordBridge:
-    def __init__(self, bot, ctx, email):
+    def __init__(self, bot, ctx, email, inbox_url=None):
         self.bot = bot
         self.ctx = ctx
         self.email = email
+        self.inbox_url = inbox_url
         self.loop = asyncio.get_running_loop()
 
     def get_otp(self):
@@ -149,10 +150,11 @@ class DiscordBridge:
         return future.result()
 
     async def _async_get_otp(self):
-        await self.ctx.send(
-            f"✉️ **OTP has been sent to `{self.email}`.**\n"
-            f"Please check your inbox and reply here with the 6-digit code, or reply `resend` to request a new code."
-        )
+        msg_text = f"✉️ **OTP has been sent to `{self.email}`.**\n"
+        if self.inbox_url:
+            msg_text += f"📬 **Inbox Link**: {self.inbox_url}\n"
+        msg_text += f"Please check your inbox and reply here with the 6-digit code, or reply `resend` to request a new code."
+        await self.ctx.send(msg_text)
 
         def check(m):
             return m.author == self.ctx.author and m.channel == self.ctx.channel
@@ -216,6 +218,57 @@ class DiscordBridge:
             except Exception as e:
                 print(f"Failed to send file {file_path} to Discord: {e}")
 
+def fetch_otp_from_inbox(driver, inbox_url, exclude_otp=None, max_wait=300, bridge=None):
+    original_window = driver.current_window_handle
+    
+    # Open new tab and navigate to inbox_url
+    driver.execute_script("window.open(arguments[0], '_blank');", inbox_url)
+    time.sleep(1)
+    
+    # Switch to the new tab
+    new_window = [w for w in driver.window_handles if w != original_window][-1]
+    driver.switch_to.window(new_window)
+    
+    otp_code = None
+    start_time = time.time()
+    
+    if bridge:
+        bridge.send_log(f"[*] Opened inbox tab: waiting for verification code...")
+        
+    while time.time() - start_time < max_wait:
+        try:
+            # Find <p> tags with 6-digit text
+            elements = driver.find_elements(By.TAG_NAME, "p")
+            for el in elements:
+                txt = el.text.strip()
+                txt_clean = re.sub(r'\s+', '', txt)
+                if txt_clean.isdigit() and len(txt_clean) == 6:
+                    if exclude_otp and txt_clean == exclude_otp:
+                        continue
+                    otp_code = txt_clean
+                    break
+            
+            if otp_code:
+                if bridge:
+                    bridge.send_log(f"[+] Found verification code: {otp_code}")
+                break
+        except Exception as e:
+            print(f"[OTP Fetch] Error: {e}")
+            
+        time.sleep(4)
+        try:
+            driver.refresh()
+        except:
+            pass
+            
+    # Close inbox tab and switch back
+    try:
+        driver.close()
+    except:
+        pass
+    driver.switch_to.window(original_window)
+    return otp_code
+
 def run_flow(email, bridge):
     max_retries = 3
     retry_count = 0
@@ -264,10 +317,21 @@ def run_flow(email, bridge):
             bridge.send_log("[*] Submitted email address.")
             
             # OTP prompt loop
+            first_otp = None
+            last_tried_otp = None
             while True:
-                otp = bridge.get_otp()
-                if not otp:
-                    raise Exception("OTP prompt timed out or cancelled by user.")
+                if bridge.inbox_url:
+                    otp = fetch_otp_from_inbox(driver, bridge.inbox_url, exclude_otp=last_tried_otp, bridge=bridge)
+                    if not otp:
+                        raise Exception("Failed to retrieve OTP from inbox URL.")
+                    last_tried_otp = otp
+                else:
+                    otp = bridge.get_otp()
+                    if not otp:
+                        raise Exception("OTP prompt timed out or cancelled by user.")
+                
+                if not first_otp:
+                    first_otp = otp
                 
                 if otp.lower() == 'resend':
                     bridge.send_log("[*] Requesting resend of email verification code...")
@@ -332,7 +396,7 @@ def run_flow(email, bridge):
                     except Exception:
                         print("Chrome driver disconnected. Propagating error to restart browser.")
                         raise loop_err
-
+ 
                     try:
                         current_url = driver.current_url
                         page_title = driver.title
@@ -351,7 +415,7 @@ def run_flow(email, bridge):
                     else:
                         bridge.send_log(msg)
             
-            return True, driver
+            return True, driver, first_otp
             
         except Exception as e:
             print(f"Flow attempt {retry_count+1} failed:")
@@ -370,8 +434,8 @@ def run_flow(email, bridge):
                         driver.quit()
                     except:
                         pass
-                return False, None
-
+                return False, None, None
+ 
             retry_count += 1
             if driver:
                 try:
@@ -386,7 +450,7 @@ def run_flow(email, bridge):
             else:
                 break
                 
-    return False, None
+    return False, None, None
 
 def create_driver(options=None):
     is_headless = os.getenv("DOCKER_ENV") == "true" or os.name != 'nt'
@@ -472,7 +536,7 @@ def create_driver(options=None):
         final_options = get_chrome_options()
         return uc.Chrome(options=final_options, headless=False, use_subprocess=True)
 
-def fill_profile_form(driver):
+def fill_profile_form(driver, inbox_url=None, first_otp=None, bridge=None):
     print("Waiting for profile registration form to load...")
     form_detected = False
     name_input = None
@@ -711,6 +775,92 @@ def fill_profile_form(driver):
     print("Waiting 4 seconds for profile creation...")
     time.sleep(4)
     
+    # === Add Password settings flow ===
+    try:
+        print("[Security] Navigating to Security settings page...")
+        driver.get("https://chatgpt.com/#settings/Security")
+        time.sleep(4)
+        
+        wait_sec = WebDriverWait(driver, 15)
+        
+        # Click "Add Password" button
+        pass_btn = wait_sec.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='password-setting']")))
+        try:
+            pass_btn.click()
+        except:
+            driver.execute_script("arguments[0].click();", pass_btn)
+        print("[Security] Clicked password-setting button.")
+        time.sleep(3)
+        
+        # Wait for the verification code input
+        code_input = wait_sec.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[placeholder='Code'], input[name='code']")))
+        print("[Security] Found identity verification code input for password addition.")
+        
+        # Get the new OTP code (excluding the first login OTP)
+        if inbox_url:
+            new_otp = fetch_otp_from_inbox(driver, inbox_url, exclude_otp=first_otp, bridge=bridge)
+        else:
+            if bridge:
+                new_otp = bridge.get_otp()
+            else:
+                new_otp = None
+                
+        if not new_otp:
+            raise Exception("Verification code for password setup not provided/found.")
+            
+        # Enter verification code
+        for digit in new_otp:
+            code_input.send_keys(digit)
+            time.sleep(random.uniform(0.1, 0.3))
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
+        time.sleep(1.5)
+        
+        # Click Continue to verify identity
+        continue_btn = wait_sec.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[name='intent'][value='validate'], button[data-dd-action-name='Continue']")))
+        try:
+            continue_btn.click()
+        except:
+            driver.execute_script("arguments[0].click();", continue_btn)
+        print("[Security] Clicked verification Continue button.")
+        time.sleep(4)
+        
+        # Wait for password input fields
+        new_pass_input = wait_sec.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[name='new-password']")))
+        confirm_pass_input = wait_sec.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[name='confirm-password']")))
+        
+        password_to_set = "SLEEPYYY12177"
+        
+        # Type password
+        new_pass_input.clear()
+        new_pass_input.send_keys(password_to_set)
+        confirm_pass_input.clear()
+        confirm_pass_input.send_keys(password_to_set)
+        
+        # Dispatch input events
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", new_pass_input)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", confirm_pass_input)
+        time.sleep(2)
+        
+        # Click Continue to save the password
+        submit_pass_btn = wait_sec.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit'][data-dd-action-name='Continue']")))
+        try:
+            submit_pass_btn.click()
+        except:
+            driver.execute_script("arguments[0].click();", submit_pass_btn)
+        print("[Security] Clicked password save Continue button.")
+        time.sleep(4)
+        print("[Security] Password setup completed successfully.")
+        
+    except Exception as sec_e:
+        print(f"[Security Error] Failed to set password: {sec_e}")
+        try:
+            driver.save_screenshot("security_flow_error.png")
+            if bridge:
+                bridge.send_file("security_flow_error.png", content=f"⚠️ **Security Setup Failed:** {sec_e}")
+                os.remove("security_flow_error.png")
+        except:
+            pass
+
     print("Opening ChatGPT session API...")
     driver.switch_to.new_window('tab')
     driver.get(CHATGPT_SESSION_URL)
@@ -805,28 +955,28 @@ def cleanup_chrome_processes():
         except Exception as pe:
             print(f"Error cleaning dangling Chrome processes: {pe}")
 
-async def run_onboarding_background(ctx, bot, email):
+async def run_onboarding_background(ctx, bot, email, inbox_url=None):
     async with bot_semaphore:
         with active_checks_lock:
             global active_checks
             active_checks += 1
 
         local_driver = None
-        bridge = DiscordBridge(bot, ctx, email)
+        bridge = DiscordBridge(bot, ctx, email, inbox_url)
         try:
-            success, local_driver = await asyncio.to_thread(run_flow, email, bridge)
+            success, local_driver, first_otp = await asyncio.to_thread(run_flow, email, bridge)
             if success and local_driver:
                 with active_drivers_lock:
                     active_drivers[email] = local_driver
                 
-                session_text = await asyncio.to_thread(fill_profile_form, local_driver)
+                session_text = await asyncio.to_thread(fill_profile_form, local_driver, inbox_url, first_otp, bridge)
                 if session_text:
                     bridge.send_log(f"[System] Onboarding complete for {email}. Compiling session data...")
                     
                     # Save session to a temp file and send it
                     filename = f"session_{email.replace('@', '_').replace('.', '_')}.txt"
                     with open(filename, "w", encoding="utf-8") as f:
-                        f.write(session_text)
+                        f.write(f"Email: {email}\nPassword: SLEEPYYY12177\n\nSession Data:\n{session_text}")
                     
                     if os.path.exists(filename):
                         discord_file = discord.File(filename)
@@ -923,14 +1073,22 @@ async def on_command_error(ctx, error):
         print(f"Error executing command: {error}")
 
 @bot.command(name="session")
-async def session_command(ctx, *, email: str = ""):
+async def session_command(ctx, *, email_input: str = ""):
     """Automate ChatGPT onboarding and export session details inside a .txt file"""
-    if not email:
-        await ctx.send("[Warning] Invalid format! Please use: !session email")
+    if not email_input:
+        await ctx.send("[Warning] Invalid format! Please use: !session email|inbox_url")
         return
 
-    email = email.strip()
-    asyncio.create_task(run_onboarding_background(ctx, bot, email))
+    email_input = email_input.strip()
+    inbox_url = None
+    if "|" in email_input:
+        parts = email_input.split("|", 1)
+        email = parts[0].strip()
+        inbox_url = parts[1].strip()
+    else:
+        email = email_input
+
+    asyncio.create_task(run_onboarding_background(ctx, bot, email, inbox_url))
     await ctx.send(f"[Success] Session process initiated for `{email}`. Follow instructions below for OTP...")
 
 @bot.command(name="close")

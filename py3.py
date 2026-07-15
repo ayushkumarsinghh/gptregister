@@ -1363,6 +1363,10 @@ if __name__ == "__main__":
 
     BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
     
+    if not BOT_TOKEN:
+        print("[Error] No BOT_TOKEN or DISCORD_TOKEN found in environment variables! Please set it before running the bot.", flush=True)
+        sys.exit(1)
+        
     # Mask and log the loaded token for verification
     masked_token = BOT_TOKEN[:10] + "..." if len(BOT_TOKEN) > 10 else BOT_TOKEN
     print(f"[System] Bot Token successfully loaded: {masked_token}", flush=True)

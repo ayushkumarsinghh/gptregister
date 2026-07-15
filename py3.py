@@ -241,10 +241,23 @@ def fetch_otp_from_inbox(driver, inbox_url, exclude_otp=None, max_wait=300, brid
     
     # Open new tab and navigate to inbox_url
     driver.execute_script("window.open(arguments[0], '_blank');", inbox_url)
-    time.sleep(1)
     
-    # Switch to the new tab
-    new_window = [w for w in driver.window_handles if w != original_window][-1]
+    # Wait for the new window handle to appear
+    new_window = None
+    start_wait = time.time()
+    while time.time() - start_wait < 10:
+        handles = driver.window_handles
+        other_handles = [w for w in handles if w != original_window]
+        if other_handles:
+            new_window = other_handles[-1]
+            break
+        time.sleep(0.5)
+        
+    if not new_window:
+        if bridge:
+            bridge.send_log("[Warning] Failed to open a new tab for the inbox URL.")
+        return None
+        
     driver.switch_to.window(new_window)
     
     otp_code = None
@@ -279,12 +292,17 @@ def fetch_otp_from_inbox(driver, inbox_url, exclude_otp=None, max_wait=300, brid
         except:
             pass
             
-    # Close inbox tab and switch back
+    # Close inbox tab and switch back (making sure we don't close the original login window)
     try:
-        driver.close()
+        if driver.current_window_handle != original_window:
+            driver.close()
     except:
         pass
-    driver.switch_to.window(original_window)
+    try:
+        driver.switch_to.window(original_window)
+        time.sleep(1.5)
+    except:
+        pass
     return otp_code
 
 def run_flow(email, bridge):

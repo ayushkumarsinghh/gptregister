@@ -20,6 +20,24 @@ import socketserver
 import ssl
 import urllib.request
 import queue
+import hmac
+import hashlib
+import struct
+import base64
+
+# --- TOTP GENERATOR ---
+def get_totp(secret):
+    secret = secret.replace(" ", "").upper()
+    missing_padding = len(secret) % 8
+    if missing_padding:
+        secret += '=' * (8 - missing_padding)
+    key = base64.b32decode(secret)
+    t = int(time.time() // 30)
+    msg = struct.pack(">Q", t)
+    h = hmac.new(key, msg, hashlib.sha1).digest()
+    o = h[19] & 15
+    token = (struct.unpack(">I", h[o:o+4])[0] & 0x7fffffff) % 1000000
+    return f"{token:06d}"
 
 # --- CONFIG ---
 CHATGPT_SESSION_URL = "https://chatgpt.com/api/auth/session"
@@ -537,6 +555,7 @@ def create_driver(options=None):
         return uc.Chrome(options=final_options, headless=False, use_subprocess=True)
 
 def fill_profile_form(driver, inbox_url=None, first_otp=None, bridge=None):
+    mfa_secret = None
     print("Waiting for profile registration form to load...")
     form_detected = False
     name_input = None
@@ -586,10 +605,10 @@ def fill_profile_form(driver, inbox_url=None, first_otp=None, bridge=None):
             print("="*50)
             print(pre_text)
             print("="*50)
-            return pre_text
+            return pre_text, None
         except Exception as e:
             print(f"[-] Session JSON not found. Page URL: {driver.current_url} | Title: {driver.title}")
-            return None
+            return None, None
 
     # Proceed with name & age entering if form was detected
     time.sleep(1)
@@ -861,6 +880,79 @@ def fill_profile_form(driver, inbox_url=None, first_otp=None, bridge=None):
         except:
             pass
 
+    # === Enable Multi-Factor Authentication (MFA) ===
+    try:
+        print("[MFA] Initializing Multi-Factor Authentication setup...")
+        # Reload/navigate to settings to close modal and start fresh
+        driver.get("https://chatgpt.com/#settings/Security")
+        time.sleep(4)
+        
+        wait_sec = WebDriverWait(driver, 15)
+        
+        # Toggle MFA switch
+        mfa_toggle = wait_sec.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='mfa-authenticator-toggle']"))
+        )
+        try:
+            mfa_toggle.click()
+        except:
+            driver.execute_script("arguments[0].click();", mfa_toggle)
+        print("[MFA] Clicked MFA authenticator toggle.")
+        time.sleep(3)
+        
+        # Click "Trouble scanning?" button
+        trouble_btn = wait_sec.until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Trouble scanning?')]"))
+        )
+        try:
+            trouble_btn.click()
+        except:
+            driver.execute_script("arguments[0].click();", trouble_btn)
+        print("[MFA] Clicked 'Trouble scanning?' button.")
+        time.sleep(2)
+        
+        # Extract 2FA secret code
+        secret_div = wait_sec.until(
+            EC.presence_of_element_located((By.XPATH, "//div[@role='button' and (@aria-label='Copy code' or @title='Copy code' or contains(text(), 'Copy code'))]"))
+        )
+        mfa_secret = secret_div.text.strip()
+        print(f"[MFA] Extracted secret key: {mfa_secret}")
+        
+        # Generate 6-digit TOTP code locally in Python
+        totp_code = get_totp(mfa_secret)
+        print(f"[MFA] Generated 6-digit TOTP code: {totp_code}")
+        
+        # Locate TOTP code input field
+        totp_input = wait_sec.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "input[name='totp_otp'], input[id='totp_otp']"))
+        )
+        totp_input.clear()
+        totp_input.send_keys(totp_code)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", totp_input)
+        time.sleep(1.5)
+        
+        # Click Verify button
+        verify_btn = wait_sec.until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Verify')]"))
+        )
+        try:
+            verify_btn.click()
+        except:
+            driver.execute_script("arguments[0].click();", verify_btn)
+        print("[MFA] Clicked Verify button.")
+        time.sleep(4)
+        print("[MFA] Multi-Factor Authentication setup completed successfully!")
+        
+    except Exception as mfa_e:
+        print(f"[MFA Error] Failed to set up MFA: {mfa_e}")
+        try:
+            driver.save_screenshot("mfa_flow_error.png")
+            if bridge:
+                bridge.send_file("mfa_flow_error.png", content=f"⚠️ **MFA Setup Failed:** {mfa_e}")
+                os.remove("mfa_flow_error.png")
+        except:
+            pass
+
     print("Opening ChatGPT session API...")
     driver.switch_to.new_window('tab')
     driver.get(CHATGPT_SESSION_URL)
@@ -893,19 +985,19 @@ def fill_profile_form(driver, inbox_url=None, first_otp=None, bridge=None):
         print("="*50)
         print(pre_text)
         print("="*50)
-        return pre_text
+        return pre_text, mfa_secret
     except Exception as e:
         err_str = str(e).lower()
         if "no such window" in err_str or "window already closed" in err_str or "web view not found" in err_str:
             print("[-] Session JSON retrieval aborted: browser window was closed or lost connection.")
-            return None
+            return None, mfa_secret
         try:
             print(f"[-] Session JSON not found. Page URL: {driver.current_url} | Title: {driver.title}")
             body_text = driver.find_element(By.TAG_NAME, "body").text[:200]
             print(f"[-] Page Body Snippet: {body_text}")
         except Exception:
             pass
-        return None
+        return None, mfa_secret
 
 # --- ACCESS CONTROL SYSTEM ---
 OWNER_IDS = [1503647930098122783, 1399261885194309654, 1251196053349208077]
@@ -969,14 +1061,15 @@ async def run_onboarding_background(ctx, bot, email, inbox_url=None):
                 with active_drivers_lock:
                     active_drivers[email] = local_driver
                 
-                session_text = await asyncio.to_thread(fill_profile_form, local_driver, inbox_url, first_otp, bridge)
+                session_text, mfa_secret = await asyncio.to_thread(fill_profile_form, local_driver, inbox_url, first_otp, bridge)
                 if session_text:
                     bridge.send_log(f"[System] Onboarding complete for {email}. Compiling session data...")
                     
                     # Save session to a temp file and send it
                     filename = f"session_{email.replace('@', '_').replace('.', '_')}.txt"
                     with open(filename, "w", encoding="utf-8") as f:
-                        f.write(f"Email: {email}\nPassword: SLEEPYYY12177\n\nSession Data:\n{session_text}")
+                        mfa_str = mfa_secret if mfa_secret else "None"
+                        f.write(f"{email}|SLEEPYYY12177|{mfa_str}\n\nSession Data:\n{session_text}")
                     
                     if os.path.exists(filename):
                         discord_file = discord.File(filename)
